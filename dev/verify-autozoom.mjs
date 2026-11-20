@@ -219,7 +219,16 @@ try {
 	await delay(1_200);
 
 	// A fourth tap after the swipe.
-	const tap3 = await tapFirst(["Storage", "Sound & vibration", "Display & touch", "Apps"]);
+	const tap3 = await tapFirst([
+		"Storage",
+		"Sound & vibration",
+		"Display & touch",
+		"Apps",
+		"Security & privacy",
+		"Location",
+		"Passwords & passkeys",
+		"Safety & emergency",
+	]);
 	await delay(500);
 	await shell(["input", "keyevent", "KEYCODE_BACK"]);
 	await delay(700);
