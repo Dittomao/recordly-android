@@ -1,0 +1,59 @@
+# Android / Gradle build output
+.gradle/
+build/
+**/build/
+local.properties
+*.apk
+*.aab
+*.keystore
+*.jks
+.cxx/
+.externalNativeBuild/
+captures/
+
+# Project-local tool caches
+# scripts/build-android.ps1 keeps the Android SDK, Gradle home and emulator
+# data inside android/ so the host profile is untouched. These are large
+# machine-local caches, not project sources.
+android/.android-home/
+android/.gradle-home/
+android/.sdk-home/
+android/.sdk-jars/
+android/.emulator-data/
+android/.kotlin/
+android/.build-signing/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# Kotlin
+.kotlin/
+
+# Node / Rust / native build artifacts
+node_modules/
+target/
+*.o
+*.so
+*.dylib
+*.dll
+
+# Nested upstream repository: it has its own .git and stays independent.
+# Ignoring it prevents git from recording it as a broken submodule entry.
+recordly-upstream/
+
+# Generated renderer bundle (rebuild with `node scripts/build-renderer.mjs`).
+# build-android.ps1 rebuilds it automatically when it is missing or stale.
+android/app/src/main/assets/renderer/
+
+# Local verification media and logs. Regenerate with dev/verify-*.mjs.
+dev/verification/
+dev/*.log
+dev/recordly-screen.png
+
+# One-off session export and root-level test recording.
+/2026-*-this-session-*.txt
+/recording-verification-*.mp4

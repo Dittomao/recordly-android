@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Paths the FileProvider may hand out.
+
+     Only `files/media` is shared: recordings, exports, thumbnails and imported
+     media all live there, and nothing else in app storage is meant to leave
+     the app. Export temp files are deliberately absent — a half-written export
+     must never be toastable to another app. -->
+<paths>
+    <files-path name="media" path="media/" />
+</paths>

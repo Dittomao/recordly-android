@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Observe-only accessibility configuration.
+
+  Deliberate choices:
+
+  * `typeViewClicked` / `typeViewLongClicked` are the tap samples. They are the
+    only source of *coordinates* available to a non-consuming observer: the
+    service never calls `setMotionEventSources`, which would take the touch
+    stream away from the app being recorded (see PORTING-PLAN §4.3).
+
+  * `typeViewScrolled` / `typeWindowStateChanged` give the path between taps so
+    zoom smoothing has something to follow.
+
+  * `canRetrieveWindowContent="true"` is required to read `event.source`, and
+    `getBoundsInScreen` is the only way to turn a clicked *view* into a
+    normalized point. Nothing is scraped from the tree: the recorder reads
+    bounds and immediately drops the node.
+
+  * `flagReportViewIds` is off. It makes the framework resolve resource ids for
+    every event, which is measurable overhead in a service that runs during
+    capture, and nothing here needs ids.
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeViewClicked|typeViewLongClicked|typeViewScrolled|typeViewFocused|typeWindowStateChanged|typeTouchInteractionStart|typeTouchInteractionEnd"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/telemetry_service_description"
+    android:notificationTimeout="0"
+    android:settingsActivity="app.recordly.android.MainActivity" />

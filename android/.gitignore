@@ -1,0 +1,25 @@
+# Gradle / Android Studio
+.gradle/
+build/
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+*.iml
+.idea/
+.gradle-home/
+.android-home/
+.build-signing/
+.sdk-jars/
+.sdk-home/
+.emulator-data/
+.kotlin/
+
+# Build outputs
+*.apk
+*.aab
+*.keystore
+!debug.keystore
+
+# Installed by scripts/build-renderer.mjs
+app/src/main/assets/renderer/

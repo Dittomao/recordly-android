@@ -1,0 +1,1275 @@
+diff --git a/electron/electron-env.d.ts b/electron/electron-env.d.ts
+index 0f4b05d..2403fc0 100644
+--- a/electron/electron-env.d.ts
++++ b/electron/electron-env.d.ts
+@@ -327,6 +327,7 @@ interface Window {
+ 			message?: string;
+ 			error?: string;
+ 			userNotified?: boolean;
++			canceled?: boolean;
+ 			microphoneFallbackRequired?: boolean;
+ 		}>;
+ 		recoverRecordingOwner: () => Promise<void>;
+diff --git a/src/components/video-editor/dashboard/Dashboard.mobile.css b/src/components/video-editor/dashboard/Dashboard.mobile.css
+new file mode 100644
+index 0000000..b9880b6
+--- /dev/null
++++ b/src/components/video-editor/dashboard/Dashboard.mobile.css
+@@ -0,0 +1,69 @@
++/*
++ * Phone layout for the project dashboard.
++ *
++ * Desktop splits the body into a 192px navigation column and the project card;
++ * at 411px that leaves the card 207px wide, which wraps "Your projects" and
++ * squeezes every card. On phones the navigation becomes a slide-over drawer and
++ * the card spans the viewport.
++ */
++.dashboard-nav-toggle,
++.dashboard-sidebar-close {
++	display: none;
++}
++
++@media (max-width: 900px) {
++	.dashboard-shell .loading-content-enter {
++		flex-direction: column;
++	}
++
++	.dashboard-shell .loading-content-enter > .card {
++		margin: 8px;
++		width: auto;
++		flex: 1 1 auto;
++	}
++
++	.dashboard-nav-toggle {
++		display: inline-flex;
++	}
++
++	.dashboard-sidebar {
++		position: fixed;
++		left: 0;
++		top: 56px;
++		bottom: 0;
++		z-index: 60;
++		width: min(280px, 82vw);
++		padding-top: 3rem;
++		background: var(--background);
++		box-shadow: 12px 0 30px rgb(0 0 0 / 0.25);
++	}
++
++	.dashboard-sidebar[data-mobile-open="false"] {
++		display: none;
++	}
++
++	.dashboard-sidebar-close {
++		display: inline-flex;
++		position: absolute;
++		top: 8px;
++		right: 8px;
++		z-index: 61;
++	}
++
++	.dashboard-sidebar-backdrop {
++		display: block;
++		position: fixed;
++		inset: 56px 0 0 0;
++		z-index: 55;
++		background: rgb(0 0 0 / 0.35);
++		border: 0;
++		padding: 0;
++	}
++
++	/* The dashboard header has Library + Resume; squeeze the Resume label so
++	   both fit beside the new navigation button. */
++	.dashboard-shell > .app-frame-header .loading-content-enter,
++	.dashboard-shell > .app-frame-header {
++		min-width: 0;
++	}
++}
+diff --git a/src/components/video-editor/dashboard/Dashboard.tsx b/src/components/video-editor/dashboard/Dashboard.tsx
+index 682d99f..6a7e29d 100644
+--- a/src/components/video-editor/dashboard/Dashboard.tsx
++++ b/src/components/video-editor/dashboard/Dashboard.tsx
+@@ -1,8 +1,10 @@
+ import { useI18n as useUiLocale } from "@/contexts/I18nContext";
+ import { Card, Modal } from "@heroui/react";
++import { useState } from "react";
+ import { RecordlyAccountMenu } from "@/components/auth/RecordlyAccountMenu";
+ import { UpgradeButton } from "@/components/billing/UpgradeButton";
+ import { Button } from "@/components/ui/button";
++import { DotsThree } from "@/components/ui/icons";
+ import { AppFrameHeader } from "../layout/AppFrameHeader";
+ import { AppUpdateButton } from "../layout/AppUpdateButton";
+ import { DashboardAnnouncements } from "./DashboardAnnouncements";
+@@ -11,12 +13,16 @@ import { DashboardFilters } from "./DashboardFilters";
+ import { DashboardGrid } from "./DashboardGrid";
+ import { DashboardSidebar } from "./DashboardSidebar";
+ import { DashboardToolbar } from "./DashboardToolbar";
++import "./Dashboard.mobile.css";
+ import type { DashboardProps } from "./types";
+ import { useDashboardModel } from "./useDashboardModel";
+ export function Dashboard(props: DashboardProps) {
+ 	const { t: uiText } = useUiLocale();
+ 	const model = useDashboardModel(props);
+ 	const view = { ...props, ...model };
++	// Phones collapse the 192px navigation into a drawer so the project card
++	// gets the full width. CSS only treats this as a drawer below 900px.
++	const [navOpen, setNavOpen] = useState(false);
+ 	return (
+ 		<>
+ 			<Modal isOpen={props.open} onOpenChange={props.onOpenChange}>
+@@ -36,6 +42,16 @@ export function Dashboard(props: DashboardProps) {
+ 								<div
+ 									className={`flex min-w-0 items-center gap-2 ${props.headerLeftControlsPaddingClass ?? ""}`}
+ 								>
++									<Button
++										variant="ghost"
++										isIconOnly
++										size="sm"
++										className="dashboard-nav-toggle"
++										aria-label="Open library navigation"
++										onPress={() => setNavOpen(true)}
++									>
++										<DotsThree className="size-5" />
++									</Button>
+ 									<span className="truncate text-sm font-semibold">
+ 										{model.activeFolder?.name ??
+ 											(model.section === "settings"
+@@ -83,7 +99,19 @@ export function Dashboard(props: DashboardProps) {
+ 								</div>
+ 							</AppFrameHeader>
+ 							<div className="loading-content-enter flex min-h-0 flex-1">
+-								<DashboardSidebar {...view} />
++								{navOpen && (
++									<button
++										type="button"
++										aria-label="Close library navigation"
++										className="dashboard-sidebar-backdrop"
++										onClick={() => setNavOpen(false)}
++									/>
++								)}
++								<DashboardSidebar
++									{...view}
++									mobileOpen={navOpen}
++									onCloseMobileNav={() => setNavOpen(false)}
++								/>
+ 								<Card className="app-frame-surface my-3 mr-3 flex min-h-0 min-w-0 flex-1 flex-col gap-0 overflow-hidden rounded-3xl bg-surface p-0 shadow-sm">
+ 									{model.section !== "settings" && model.section !== "shared" && (
+ 										<>
+diff --git a/src/components/video-editor/dashboard/DashboardSettings.tsx b/src/components/video-editor/dashboard/DashboardSettings.tsx
+index dee8ddc..9022085 100644
+--- a/src/components/video-editor/dashboard/DashboardSettings.tsx
++++ b/src/components/video-editor/dashboard/DashboardSettings.tsx
+@@ -8,6 +8,7 @@ import { supportsHudCaptureProtection } from "@/lib/hudCaptureProtection";
+ import { SettingsRow } from "../SettingsRow";
+ import { SettingsInfo } from "../SettingsInfo";
+ import { SettingsCategory, SettingsSections, type SettingsSection } from "../SettingsSections";
++import { isTouchHost } from "../touchZoomPolicy";
+ import { ThemeAppearancePicker } from "./ThemeAppearancePicker";
+ import { AppUpdateSettings } from "./AppUpdateSettings";
+ import { SettingsSidebarFooter } from "./SettingsSidebarFooter";
+@@ -20,6 +21,7 @@ export function DashboardSettings({
+ 	initialCategory?: SettingsSection;
+ }) {
+ 	const { t } = useI18n();
++	const touchHost = isTouchHost();
+ 	const settingsContent = useContext(DashboardSettingsContext);
+ 	const [directory, setDirectory] = useState("");
+ 	const [recordings, setRecordings] = useState("");
+@@ -133,7 +135,7 @@ export function DashboardSettings({
+ 			</h1>
+ 			<SettingsSections
+ 				variant="tabs"
+-				sidebarFooter={(select) => (
++				sidebarFooter={touchHost ? undefined : (select) => (
+ 					<SettingsSidebarFooter onAccount={() => select("account")} />
+ 				)}
+ 				initialCategory={
+@@ -145,14 +147,23 @@ export function DashboardSettings({
+ 							? "recording"
+ 							: initialCategory
+ 				}
+-				categories={[
+-					"general",
+-					"recording",
+-					"motion",
+-					"shortcuts",
+-					"account",
+-					...(import.meta.env.DEV ? ["developer" as const] : []),
+-				]}
++				categories={
++					(touchHost
++						? [
++								"general",
++								"recording",
++								"motion",
++								...(import.meta.env.DEV ? ["developer" as const] : []),
++							]
++						: [
++								"general",
++								"recording",
++								"motion",
++								"shortcuts",
++								"account",
++								...(import.meta.env.DEV ? ["developer" as const] : []),
++							]) as SettingsSection[]
++				}
+ 			>
+ 				<SettingsCategory category="general">
+ 					<header className="dashboard-settings-group">
+@@ -301,7 +312,10 @@ export function DashboardSettings({
+ 					)}
+ 				</SettingsCategory>
+ 				<SettingsCategory category="general">
+-					<header className="dashboard-settings-group dashboard-settings-subgroup">
++					<header
++						className="dashboard-settings-group dashboard-settings-subgroup"
++						hidden={touchHost}
++					>
+ 						<h2>{t("settings.appPreferences.storage", "Storage")}</h2>
+ 						<p>
+ 							{t(
+@@ -310,7 +324,7 @@ export function DashboardSettings({
+ 							)}
+ 						</p>
+ 					</header>
+-					<div className="settings-group">
++					<div className="settings-group" hidden={touchHost}>
+ 						<div className="settings-item">
+ 							<SettingsRow
+ 								title={t(
+@@ -428,7 +442,7 @@ export function DashboardSettings({
+ 							{status("projects")}
+ 						</div>
+ 					</div>
+-					{(folderErrors.recordings || folderErrors.projects) && (
++					{!touchHost && (folderErrors.recordings || folderErrors.projects) && (
+ 						<Button
+ 							size="sm"
+ 							variant="secondary"
+@@ -439,7 +453,7 @@ export function DashboardSettings({
+ 					)}
+ 				</SettingsCategory>
+ 				<SettingsCategory category="general">
+-					<AppUpdateSettings />
++					{!touchHost && <AppUpdateSettings />}
+ 				</SettingsCategory>
+ 				<SettingsCategory category="developer">
+ 					{import.meta.env.DEV && (
+diff --git a/src/components/video-editor/dashboard/DashboardSidebar.tsx b/src/components/video-editor/dashboard/DashboardSidebar.tsx
+index adc022f..21426ee 100644
+--- a/src/components/video-editor/dashboard/DashboardSidebar.tsx
++++ b/src/components/video-editor/dashboard/DashboardSidebar.tsx
+@@ -1,7 +1,7 @@
+ import { useState } from "react";
+ import { FeedbackDialog } from "@/components/feedback/FeedbackDialog";
+ import { Button } from "@/components/ui/button";
+-import { ChatWarning, Cloud, GearSix, House, Plus } from "@/components/ui/icons";
++import { ChatWarning, Cloud, GearSix, House, Plus, X } from "@/components/ui/icons";
+ import { useI18n as useUiLocale } from "@/contexts/I18nContext";
+ import { FolderRow } from "./FolderRow";
+ import { RecordNewButton } from "./RecordNewButton";
+@@ -25,6 +25,8 @@ export function DashboardSidebar({
+ 	update,
+ 	navClass,
+ 	onSignIn,
++	mobileOpen = false,
++	onCloseMobileNav,
+ }: Pick<
+ 	DashboardProps & DashboardModel,
+ 	| "busy"
+@@ -40,22 +42,39 @@ export function DashboardSidebar({
+ 	| "navClass"
+ 	| "onSignIn"
+ 	| "authToken"
+->) {
++> & {
++	mobileOpen?: boolean;
++	onCloseMobileNav?: () => void;
++}) {
+ 	const { t: uiText } = useUiLocale();
+ 	const [feedbackOpen, setFeedbackOpen] = useState(false);
+ 	return (
+ 		<>
+ 			<aside
+ 				aria-label={uiText("ui.libraryNavigation")}
+-				className="flex min-h-0 w-48 shrink-0 flex-col bg-transparent px-4 pb-5 pt-3 lg:w-56"
++				data-mobile-open={mobileOpen ? "true" : "false"}
++				className="dashboard-sidebar flex min-h-0 w-48 shrink-0 flex-col bg-transparent px-4 pb-5 pt-3 lg:w-56"
+ 			>
++				<Button
++					variant="ghost"
++					isIconOnly
++					size="sm"
++					aria-label="Close library navigation"
++					className="dashboard-sidebar-close"
++					onPress={onCloseMobileNav}
++				>
++					<X className="size-4" aria-hidden="true" />
++				</Button>
+ 				<RecordNewButton busy={busy} run={run} className="mb-5 w-full" />
+ 				<nav className="space-y-1">
+ 					<Button
+ 						variant="ghost"
+ 						className={navClass(section === "projects")}
+ 						aria-current={section === "projects" ? "page" : undefined}
+-						onClick={() => setSection("projects")}
++						onClick={() => {
++							setSection("projects");
++							onCloseMobileNav?.();
++						}}
+ 					>
+ 						<House weight="fill" className="size-[18px]" />
+ 						{uiText("ui.home")}
+@@ -64,7 +83,10 @@ export function DashboardSidebar({
+ 						variant="ghost"
+ 						className={navClass(section === "shared")}
+ 						aria-current={section === "shared" ? "page" : undefined}
+-						onClick={() => setSection("shared")}
++						onClick={() => {
++							setSection("shared");
++							onCloseMobileNav?.();
++						}}
+ 					>
+ 						<Cloud
+ 							weight={section === "shared" ? "fill" : "regular"}
+@@ -139,7 +161,10 @@ export function DashboardSidebar({
+ 						variant="ghost"
+ 						className={navClass(section === "settings")}
+ 						aria-current={section === "settings" ? "page" : undefined}
+-						onClick={() => openSettings()}
++						onClick={() => {
++							openSettings();
++							onCloseMobileNav?.();
++						}}
+ 					>
+ 						<GearSix weight="fill" className="size-[18px]" aria-hidden="true" />
+ 						{uiText("ui.settings")}
+diff --git a/src/components/video-editor/dashboard/generateProjectThumbnail.ts b/src/components/video-editor/dashboard/generateProjectThumbnail.ts
+index c9babf0..cb8420e 100644
+--- a/src/components/video-editor/dashboard/generateProjectThumbnail.ts
++++ b/src/components/video-editor/dashboard/generateProjectThumbnail.ts
+@@ -89,6 +89,7 @@ export async function generateProjectThumbnail(
+ 						),
+ 					),
+ 				);
++			try {
+ 				renderer = new FrameRenderer({
+ 					...editor,
+ 					cursorTelemetry,
+@@ -120,6 +121,14 @@ export async function generateProjectThumbnail(
+ 					),
+ 					duration,
+ 				};
++			} catch (error) {
++				checkDeadline();
++				console.warn("Project thumbnail composition failed; using source frame", error);
++				return {
++					url: captureProjectThumbnailCanvas(video, video.videoWidth, video.videoHeight),
++					duration,
++				};
++			}
+ 			}
+ 			return {
+ 				url: captureProjectThumbnailCanvas(video, video.videoWidth, video.videoHeight),
+diff --git a/src/components/video-editor/hooks/useAutoApplyZooms.ts b/src/components/video-editor/hooks/useAutoApplyZooms.ts
+index 16331f8..a97438c 100644
+--- a/src/components/video-editor/hooks/useAutoApplyZooms.ts
++++ b/src/components/video-editor/hooks/useAutoApplyZooms.ts
+@@ -2,6 +2,7 @@ import type { Span } from "dnd-timeline";
+ import { useEffect, useRef } from "react";
+ import { DEFAULT_ZOOM_BLOCK_DURATION_MS } from "../timeline/core/constants";
+ import { buildInteractionZoomSuggestions } from "../timeline/zoomSuggestionUtils";
++import { touchZoomParams } from "../touchZoomPolicy";
+ import type { ClipRegion, CursorTelemetryPoint, ZoomFocus, ZoomRegion } from "../types";
+ 
+ interface Input {
+@@ -21,7 +22,11 @@ interface Input {
+ export function applyAutomaticZooms(input: Input): boolean {
+ 	if (!input.ready || !input.sourcePath || !Number.isFinite(input.totalMs) || input.totalMs <= 0)
+ 		return false;
+-	if (!input.enabled || input.isSavedProject || input.zoomRegions.length > 0) return true;
++	// Do not latch a skip: a fresh take can briefly report the previous
++	// project's saved state, and latching here was why some takes opened with
++	// auto-zoom silently disabled.
++	if (input.zoomRegions.length > 0) return true;
++	if (!input.enabled || input.isSavedProject) return false;
+ 	// Imported sequences get new media paths too. Only start on an unedited take;
+ 	// adding/trimming clips while telemetry loads must preserve the user's timeline.
+ 	const clip = input.clipRegions[0];
+@@ -42,6 +47,7 @@ export function applyAutomaticZooms(input: Input): boolean {
+ 		totalMs: input.totalMs,
+ 		defaultDurationMs: Math.min(DEFAULT_ZOOM_BLOCK_DURATION_MS, input.totalMs),
+ 		reservedSpans: [],
++		...touchZoomParams(),
+ 	});
+ 	for (const suggestion of result.suggestions) {
+ 		input.onZoomSuggested({ start: suggestion.start, end: suggestion.end }, suggestion.focus);
+diff --git a/src/components/video-editor/hooks/useZoomRegionCommands.ts b/src/components/video-editor/hooks/useZoomRegionCommands.ts
+index 0faae69..380d439 100644
+--- a/src/components/video-editor/hooks/useZoomRegionCommands.ts
++++ b/src/components/video-editor/hooks/useZoomRegionCommands.ts
+@@ -10,6 +10,7 @@ import {
+ 	type ZoomMode,
+ 	type ZoomRegion,
+ } from "../types";
++import { isTouchHost, touchZoomDepth } from "../touchZoomPolicy";
+ import { getZoomFocusSpace } from "../videoPlayback/focusUtils";
+ 
+ interface UseZoomRegionCommandsParams {
+@@ -90,12 +91,16 @@ export function useZoomRegionCommands({
+ 
+ 	const handleZoomSuggested = useCallback(
+ 		(span: Span, focus: ZoomFocus) => {
++			// Touch keeps more context when it can: 1.25x for a central target,
++			// progressively deeper when the target is near an edge so the camera
++			// can actually reach it. The Windows reference sits around 1.1-1.35x.
++			const depth = isTouchHost() ? touchZoomDepth(focus) : DEFAULT_AUTO_ZOOM_DEPTH;
+ 			const newRegion: ZoomRegion = {
+ 				id: `zoom-${nextZoomIdRef.current++}`,
+ 				startMs: Math.round(span.start),
+ 				endMs: Math.round(span.end),
+-				depth: DEFAULT_AUTO_ZOOM_DEPTH,
+-				focus: clampFocusToDepth(focus, DEFAULT_AUTO_ZOOM_DEPTH),
++				depth,
++				focus: clampFocusToDepth(focus, depth),
+ 				focusSpace: "source",
+ 				mode: "auto",
+ 			};
+diff --git a/src/components/video-editor/layout/EditorShell.tsx b/src/components/video-editor/layout/EditorShell.tsx
+index d2145ba..44d7c5f 100644
+--- a/src/components/video-editor/layout/EditorShell.tsx
++++ b/src/components/video-editor/layout/EditorShell.tsx
+@@ -45,6 +45,7 @@ import { resolveVideoUrl } from "../projectPersistence";
+ import { isMissingProjectRecording } from "../project/projectLoadError";
+ import { AutoZoomNudgeContext, useAutoZoomNudge } from "../timeline/useAutoZoomNudge";
+ import { useAutoApplyZooms } from "../hooks/useAutoApplyZooms";
++import { isTouchHost } from "../touchZoomPolicy";
+ 
+ type Props = {
+ 	t: ReturnType<typeof useI18n>["t"];
+@@ -134,7 +135,14 @@ export function EditorShell(props: Props) {
+ 	useAutoApplyZooms({
+ 		enabled: appearance.autoApplyFreshRecordingAutoZooms,
+ 		sourcePath: project.videoSourcePath,
+-		ready: !project.loading && ui.isPreviewReady && ui.clipInitializedRef.current,
++		// A phone-width editor can collapse the preview canvas to zero, so
++		// `isPreviewReady` never flips. Zoom suggestions only need the media
++		// duration and an initialized clip, not a visible preview.
++		ready:
++			!project.loading &&
++			ui.duration > 0 &&
++			ui.clipInitializedRef.current &&
++			(isTouchHost() || ui.isPreviewReady),
+ 		isSavedProject: project.openedSavedProject,
+ 		totalMs: ui.duration * 1000,
+ 		clipRegions: timeline.clipRegions,
+diff --git a/src/components/video-editor/layout/EditorSidebar.mobile.css b/src/components/video-editor/layout/EditorSidebar.mobile.css
+new file mode 100644
+index 0000000..5f36f73
+--- /dev/null
++++ b/src/components/video-editor/layout/EditorSidebar.mobile.css
+@@ -0,0 +1,124 @@
++/*
++ * Phone layout for the editor shell.
++ *
++ * The desktop top row is [rail + 320px inspector][preview]. At 411px that leaves
++ * the preview 19px wide (measured), so the video is invisible. On phones the
++ * inspector becomes a slide-over drawer and the preview keeps the full width
++ * beside the 64px rail. The drawer is closed by default and opened from a rail
++ * icon; a backdrop or the header close button dismisses it.
++ */
++/* The close affordance exists only in the phone drawer. */
++.editor-inspector-close {
++	display: none;
++}
++
++@media (max-width: 900px) {
++	.editor-sidebar {
++		position: relative;
++	}
++
++	.editor-sidebar .editor-inspector {
++		position: absolute;
++		left: 4rem;
++		top: 0;
++		bottom: 0.5rem;
++		z-index: 40;
++		width: min(320px, calc(100vw - 5rem));
++	}
++
++	.editor-sidebar[data-mobile-open="false"] .editor-inspector {
++		display: none;
++	}
++
++	.editor-sidebar-backdrop {
++		display: none;
++	}
++
++	.editor-sidebar[data-mobile-open="true"] .editor-sidebar-backdrop {
++		display: block;
++		position: fixed;
++		inset: 56px 0 0 0;
++		z-index: 35;
++		background: rgb(0 0 0 / 0.35);
++		border: 0;
++		padding: 0;
++	}
++
++	/* Keep the rail above the backdrop so another section can be chosen
++	   without closing the drawer first. */
++	.editor-sidebar nav {
++		position: relative;
++		z-index: 36;
++	}
++
++	.editor-inspector-close {
++		display: inline-flex;
++	}
++
++	/* The desktop header uses two fixed grid columns (7px + 360px); at phone
++	   width the project group was clipped to 7px. Give the left group the
++	   remaining space and drop controls that only exist on desktop. */
++	.app-frame-header {
++		grid-template-columns: minmax(0, 1fr) auto !important;
++		padding-inline: 12px;
++		column-gap: 8px;
++	}
++
++	.app-frame-header .editor-header-start {
++		flex: 1 1 auto;
++		min-width: 0;
++	}
++
++	.app-frame-header .editor-header-title {
++		flex: 1 1 auto;
++		min-width: 0;
++	}
++
++	.app-frame-header .editor-header-title button {
++		display: block;
++		min-width: 0;
++		max-width: 100%;
++		max-height: 36px;
++		font-size: 12px;
++		line-height: 1.15;
++		white-space: normal;
++		overflow: hidden;
++		padding-inline: 4px;
++	}
++
++	/* The name lives in an upstream `truncate` span; allow two lines so a
++	   timestamp-named project is identifiable without hiding other actions. */
++	.app-frame-header .editor-header-title button > span {
++		display: -webkit-box;
++		-webkit-line-clamp: 2;
++		-webkit-box-orient: vertical;
++		white-space: normal !important;
++		overflow: hidden;
++		text-overflow: clip;
++		line-height: 1.15;
++		max-height: 28px;
++	}
++
++	/* Decorative breadcrumb separators cost 49px the project name needs. */
++	.app-frame-header .editor-header-start > span.mx-2,
++	.app-frame-header .editor-header-start > .separator {
++		display: none;
++	}
++
++	.app-frame-header .editor-header-end {
++		gap: 6px;
++	}
++
++	.app-frame-header [aria-label="Recordly account"] {
++		display: none;
++	}
++
++	.app-frame-header .button--secondary {
++		display: none;
++	}
++
++	.app-frame-header [aria-label="Feedback"] {
++		display: none;
++	}
++}
++
+diff --git a/src/components/video-editor/layout/EditorSidebar.tsx b/src/components/video-editor/layout/EditorSidebar.tsx
+index 12255b3..acafd12 100644
+--- a/src/components/video-editor/layout/EditorSidebar.tsx
++++ b/src/components/video-editor/layout/EditorSidebar.tsx
+@@ -10,11 +10,12 @@ import {
+ } from "@heroui/react";
+ import type { ComponentProps, ReactNode } from "react";
+ import { useMemo, useRef, useState } from "react";
+-import { Camera, ClosedCaptioning, Cursor, FrameCorners, Gear } from "@/components/ui/icons";
++import { Camera, ClosedCaptioning, Cursor, FrameCorners, Gear, X } from "@/components/ui/icons";
+ import type { useI18n } from "@/contexts/I18nContext";
+ import ExtensionManager from "../ExtensionManager";
+ import { SettingsPanel } from "../SettingsPanel";
+ import type { EditorEffectSection } from "../types";
++import "./EditorSidebar.mobile.css";
+ 
+ function IconRailTooltip({ label, children }: { label: string; children: ReactNode }) {
+ 	const [open, setOpen] = useState(false);
+@@ -60,6 +61,10 @@ export function EditorSidebar({
+ }: Props) {
+ 	const { t: uiText } = useUiLocale();
+ 	const [advancedSections, setAdvancedSections] = useState<Record<string, boolean>>({});
++	// Phones start with the inspector closed so the preview is visible; the CSS
++	// only treats this as a drawer below 900px.
++	const [inspectorOpen, setInspectorOpen] = useState(false);
++	const showInspector = inspectorOpen || Boolean(panelContent);
+ 	const advanced = advancedSections[activeSection] ?? false;
+ 	const selectedAnnotation = settingsPanelProps.annotationRegions?.find(
+ 		(region) => region.id === settingsPanelProps.selectedAnnotationId,
+@@ -87,7 +92,16 @@ export function EditorSidebar({
+ 		[t],
+ 	);
+ 	return (
+-		<div className="flex min-h-0 shrink-0 pb-3 pr-2">
++		<div
++			className="editor-sidebar flex min-h-0 shrink-0 pb-3 pr-2"
++			data-mobile-open={showInspector ? "true" : "false"}
++		>
++			<button
++				type="button"
++				aria-label="Close editor settings"
++				className="editor-sidebar-backdrop"
++				onClick={() => setInspectorOpen(false)}
++			/>
+ 			<nav
+ 				aria-label={t("settings.sections.title", "Editor tools")}
+ 				className="flex w-16 shrink-0 flex-col items-center gap-3 py-2.5"
+@@ -101,7 +115,10 @@ export function EditorSidebar({
+ 					selectedKeys={panelContent ? [] : [activeSection]}
+ 					onSelectionChange={(keys) => {
+ 						const key = Array.from(keys)[0];
+-						if (key) setActiveSection(key as EditorEffectSection);
++						if (key) {
++							setActiveSection(key as EditorEffectSection);
++							setInspectorOpen(true);
++						}
+ 					}}
+ 				>
+ 					{sections.map((section) => (
+@@ -158,28 +175,40 @@ export function EditorSidebar({
+ 													activeSection.slice(1),
+ 											))}
+ 								</Card.Title>
+-								{hasAdvanced && (
+-									<Switch
++								<div className="flex items-center gap-2">
++									{hasAdvanced && (
++										<Switch
++											size="sm"
++											isSelected={advanced}
++											onChange={(value) =>
++												setAdvancedSections((current) => ({
++													...current,
++													[activeSection]: value,
++												}))
++											}
++											aria-label={uiText("ui.advancedSettings")}
++										>
++											<Switch.Content>
++												<Label className="text-xs">
++													{uiText("ui.advanced")}
++												</Label>
++												<Switch.Control>
++													<Switch.Thumb />
++												</Switch.Control>
++											</Switch.Content>
++										</Switch>
++									)}
++									<Button
++										variant="ghost"
++										isIconOnly
+ 										size="sm"
+-										isSelected={advanced}
+-										onChange={(value) =>
+-											setAdvancedSections((current) => ({
+-												...current,
+-												[activeSection]: value,
+-											}))
+-										}
+-										aria-label={uiText("ui.advancedSettings")}
++										aria-label="Close settings"
++										className="editor-inspector-close"
++										onPress={() => setInspectorOpen(false)}
+ 									>
+-										<Switch.Content>
+-											<Label className="text-xs">
+-												{uiText("ui.advanced")}
+-											</Label>
+-											<Switch.Control>
+-												<Switch.Thumb />
+-											</Switch.Control>
+-										</Switch.Content>
+-									</Switch>
+-								)}
++										<X className="size-4" aria-hidden="true" />
++									</Button>
++								</div>
+ 							</header>
+ 							{activeSection === "extensions" ? (
+ 								<ExtensionManager />
+diff --git a/src/components/video-editor/layout/EditorTimelinePanel.tsx b/src/components/video-editor/layout/EditorTimelinePanel.tsx
+index 7c69437..d0a3ed1 100644
+--- a/src/components/video-editor/layout/EditorTimelinePanel.tsx
++++ b/src/components/video-editor/layout/EditorTimelinePanel.tsx
+@@ -1,4 +1,5 @@
+ import type { RefObject } from "react";
++import { isTouchHost } from "../touchZoomPolicy";
+ import type { useVideoEditorAudio } from "../audio/useVideoEditorAudio";
+ import { retimeCaptionFragment } from "../captionTimeline";
+ import type { useAnnotationRegionCommands } from "../hooks/useAnnotationRegionCommands";
+@@ -61,7 +62,11 @@ export function EditorTimelinePanel(props: Props) {
+ 			tabIndex={-1}
+ 			data-timeline-panel
+ 			className="outline-none flex flex-shrink-0 flex-col bg-transparent px-4 pb-4"
+-			style={{ height: "calc(22% + 8px)", minHeight: 188, maxHeight: 288 }}
++			style={
++				isTouchHost()
++					? { height: "calc(14% + 8px)", minHeight: 120, maxHeight: 200 }
++					: { height: "calc(22% + 8px)", minHeight: 188, maxHeight: 288 }
++			}
+ 		>
+ 			<TimelineEditor
+ 				zoomPresentationOptions={props.zoomPresentationOptions}
+diff --git a/src/components/video-editor/project/useProjectLibraryController.ts b/src/components/video-editor/project/useProjectLibraryController.ts
+index 4f27a1a..2f6061c 100644
+--- a/src/components/video-editor/project/useProjectLibraryController.ts
++++ b/src/components/video-editor/project/useProjectLibraryController.ts
+@@ -133,6 +133,9 @@ export function useProjectLibraryController({
+ 	);
+ 
+ 	const captureProjectThumbnail = useCallback(async () => {
++		// Android caches a source frame in its project store. A second hidden
++		// WebView video can stall while the editor is rendering the same clip.
++		if ("__recordlyHost" in window) return null;
+ 		const previewHandle = videoPlaybackRef.current;
+ 		const previewVideo = previewHandle?.video ?? null;
+ 
+diff --git a/src/components/video-editor/settings/AppSettings.tsx b/src/components/video-editor/settings/AppSettings.tsx
+index 8fa126b..9b8ab5d 100644
+--- a/src/components/video-editor/settings/AppSettings.tsx
++++ b/src/components/video-editor/settings/AppSettings.tsx
+@@ -6,7 +6,8 @@ import { ChoiceGroup, ChoiceItem } from "@/components/ui/choice-group";
+ import { LanguageFlag } from "@/components/ui/language-flag";
+ import { Switch } from "@/components/ui/switch";
+ import { SettingsRow } from "@/components/video-editor/SettingsRow";
+-import { SettingsCategory, SettingsSections } from "@/components/video-editor/SettingsSections";
++import { SettingsCategory, SettingsSections, type SettingsSection } from "@/components/video-editor/SettingsSections";
++import { isTouchHost } from "@/components/video-editor/touchZoomPolicy";
+ import { useI18n } from "@/contexts/I18nContext";
+ import type { AppLocale } from "@/i18n/config";
+ import { SUPPORTED_LOCALES } from "@/i18n/config";
+@@ -71,22 +72,30 @@ export function AppSettings(props: Props) {
+ 	} = props.app;
+ 	const { locale, setLocale } = useI18n();
+ 	const showDevMotionControls = import.meta.env.DEV;
++	const touchHost = isTouchHost();
++	// A phone has no taskbar, no desktop updates, no keyboard shortcuts, and no
++	// usable account flow in this offline build. Keep only settings that apply.
++	const desktopCategories: SettingsSection[] = advanced
++		? [
++				"general",
++				"shortcuts",
++				"account",
++				"permissions",
++				"motion",
++				"updates",
++				...(showDevMotionControls ? ["developer" as const] : []),
++			]
++		: ["general", "shortcuts", "account", "permissions", "motion"];
++	const categories = touchHost
++		? ([
++				"general",
++				"permissions",
++				"motion",
++				...(showDevMotionControls ? ["developer" as const] : []),
++			] as const)
++		: desktopCategories;
+ 	return (
+-		<SettingsSections
+-			categories={
+-				advanced
+-					? [
+-							"general",
+-							"shortcuts",
+-							"account",
+-							"permissions",
+-							"motion",
+-							"updates",
+-							...(showDevMotionControls ? ["developer" as const] : []),
+-						]
+-					: ["general", "shortcuts", "account", "permissions", "motion"]
+-			}
+-		>
++		<SettingsSections categories={[...categories]}>
+ 			<SettingsCategory category="account">
+ 				<AccountSettings key={accountUser?.id ?? "signed-out"} user={accountUser} />
+ 			</SettingsCategory>
+@@ -165,7 +174,7 @@ export function AppSettings(props: Props) {
+ 						</ListBox>
+ 					</HeroSelect.Popover>
+ 				</HeroSelect>
+-				<ApplicationSettings />
++				{!touchHost && <ApplicationSettings />}
+ 			</SettingsCategory>
+ 			<SettingsCategory category="updates">
+ 				{advanced && (
+diff --git a/src/components/video-editor/timeline/components/viewport/TimelineCanvasRows.tsx b/src/components/video-editor/timeline/components/viewport/TimelineCanvasRows.tsx
+index 66e718a..03d05d3 100644
+--- a/src/components/video-editor/timeline/components/viewport/TimelineCanvasRows.tsx
++++ b/src/components/video-editor/timeline/components/viewport/TimelineCanvasRows.tsx
+@@ -6,6 +6,7 @@ import { useScopedT } from "@/contexts/I18nContext";
+ import { useShortcuts } from "@/contexts/ShortcutsContext";
+ import { formatBinding } from "@/lib/shortcuts";
+ import { cn } from "@/lib/utils";
++import { isTouchHost } from "../../../touchZoomPolicy";
+ import { getEmbeddedCaptionSpan, getRegionDisplaySpan } from "../../core/clipPresentation";
+ import {
+ 	CAPTION_ROW_ID,
+@@ -363,10 +364,11 @@ export const TimelineCanvasRows = memo(function TimelineCanvasRows({
+ 			<Row
+ 				id={ZOOM_ROW_ID}
+ 				compact={
++					isTouchHost() ||
+ 					annotationRows.length +
+ 						audioRows.length +
+ 						(showSourceAudioTrack ? sourceAudioTracks.length : 0) >
+-					0
++						0
+ 				}
+ 				isEmpty={zoomItems.length === 0}
+ 				onMouseEnter={onZoomRowMouseEnter}
+diff --git a/src/components/video-editor/timeline/hooks/actions/useTimelineZoomActions.ts b/src/components/video-editor/timeline/hooks/actions/useTimelineZoomActions.ts
+index fb6ebfd..89a009d 100644
+--- a/src/components/video-editor/timeline/hooks/actions/useTimelineZoomActions.ts
++++ b/src/components/video-editor/timeline/hooks/actions/useTimelineZoomActions.ts
+@@ -1,6 +1,7 @@
+ import type { Span } from "dnd-timeline";
+ import { useCallback, useMemo } from "react";
+ import type { ClipRegion, CursorTelemetryPoint, ZoomFocus, ZoomRegion } from "../../../types";
++import { touchZoomParams } from "../../../touchZoomPolicy";
+ import { DEFAULT_ZOOM_BLOCK_DURATION_MS } from "../../core/constants";
+ import { buildInteractionZoomSuggestions } from "../../zoomSuggestionUtils";
+ import { timelineNotifications } from "../utils/timelineNotifications";
+@@ -131,6 +132,7 @@ export function useTimelineZoomActions({
+ 			reservedSpans: zoomRegions
+ 				.map((region) => ({ start: region.startMs, end: region.endMs }))
+ 				.sort((a, b) => a.start - b.start),
++			...touchZoomParams(),
+ 		});
+ 
+ 		if (result.status === "no-telemetry") {
+diff --git a/src/components/video-editor/timeline/timelineLayout.ts b/src/components/video-editor/timeline/timelineLayout.ts
+index 344d35b..1dbc843 100644
+--- a/src/components/video-editor/timeline/timelineLayout.ts
++++ b/src/components/video-editor/timeline/timelineLayout.ts
+@@ -1,6 +1,14 @@
+-export const TIMELINE_AXIS_HEIGHT_PX = 36;
+-export const TIMELINE_ROW_MIN_HEIGHT_PX = 32;
+-export const TIMELINE_CLIP_ROW_HEIGHT_PX = TIMELINE_ROW_MIN_HEIGHT_PX * 2;
++import { isTouchHost } from "../touchZoomPolicy";
++
++const TOUCH = isTouchHost();
++
++export const TIMELINE_AXIS_HEIGHT_PX = TOUCH ? 28 : 36;
++// Touch gets a shorter clip strip and a compact secondary lane so the preview
++// keeps the vertical space. Desktop heights are unchanged.
++export const TIMELINE_ROW_MIN_HEIGHT_PX = TOUCH ? 28 : 32;
++export const TIMELINE_CLIP_ROW_HEIGHT_PX = TOUCH
++	? 48
++	: TIMELINE_ROW_MIN_HEIGHT_PX * 2;
+ 
+ function normalizeRowCount(rowCount: number) {
+ 	if (!Number.isFinite(rowCount)) {
+diff --git a/src/components/video-editor/timeline/zoomSuggestionUtils.ts b/src/components/video-editor/timeline/zoomSuggestionUtils.ts
+index 41ab1d2..2d506ee 100644
+--- a/src/components/video-editor/timeline/zoomSuggestionUtils.ts
++++ b/src/components/video-editor/timeline/zoomSuggestionUtils.ts
+@@ -244,6 +244,14 @@ export function buildInteractionZoomSuggestions(params: {
+ 	spacingMs?: number;
+ 	mergeGapMs?: number;
+ 	padMs?: number;
++	/** Keep the final zoom-out inside the recording (touch hosts). */
++	trailingReserveMs?: number;
++	/**
++	 * How long before the anchor the region starts. Desktop centres the block
++	 * (duration / 2) so the zoom arrives while the pointer travels; touch uses
++	 * a short lead so the zoom starts with the tap.
++	 */
++	leadMs?: number;
+ }): InteractionZoomSuggestionResult {
+ 	const {
+ 		cursorTelemetry,
+@@ -254,6 +262,8 @@ export function buildInteractionZoomSuggestions(params: {
+ 		mergeGapMs = CLICK_CLUSTER_MERGE_GAP_MS,
+ 		padMs = CLICK_CLUSTER_PAD_MS,
+ 		spacingMs = padMs,
++		trailingReserveMs = 0,
++		leadMs,
+ 	} = params;
+ 
+ 	if (totalMs <= 0) {
+@@ -355,15 +365,22 @@ export function buildInteractionZoomSuggestions(params: {
+ 
+ 	for (const [index, window] of windows.entries()) {
+ 		const { cluster } = window;
+-		// Expand the shorter side so the focus-defining click lands at the midpoint,
+-		// preserving every click and the full press/drag through its release.
+-		const halfDuration = Math.max(
++		// Start `leadMs` before the tap and keep the block at least one default
++		// duration long. An explicit lead is the touch policy; without one the
++		// desktop (and legacy) behavior stays exactly click-centred.
++		const hasExplicitLead = Number.isFinite(leadMs);
++		const lead = Math.max(0, Math.min(leadMs ?? 0, defaultDurationMs / 2));
++		const symmetricHalf = Math.max(
+ 			defaultDurationMs / 2,
+ 			cluster.anchorMs - window.start,
+ 			window.end - cluster.anchorMs,
+ 		);
+-		const centeredStart = cluster.anchorMs - halfDuration;
+-		const centeredEnd = cluster.anchorMs + halfDuration;
++		const centeredStart = hasExplicitLead
++			? Math.min(cluster.anchorMs - lead, cluster.firstMs - lead)
++			: cluster.anchorMs - symmetricHalf;
++		const centeredEnd = hasExplicitLead
++			? Math.max(centeredStart + defaultDurationMs, window.end)
++			: cluster.anchorMs + symmetricHalf;
+ 		const blockers = [...reserved, ...windows.slice(index + 1)];
+ 		const canCenter =
+ 			centeredStart >= window.lower &&
+@@ -386,23 +403,34 @@ export function buildInteractionZoomSuggestions(params: {
+ 				.filter((span) => span.start >= window.end)
+ 				.map((span) => span.start - spacingMs),
+ 		);
+-		const duration = Math.min(
+-			Math.max(defaultDurationMs, window.end - window.start),
+-			upper - lower,
+-		);
++		const spanMs = hasExplicitLead
++			? Math.max(defaultDurationMs, centeredEnd - centeredStart, window.end - window.start)
++			: Math.max(defaultDurationMs, window.end - window.start);
++		const duration = Math.min(spanMs, upper - lower);
+ 		const minStart = Math.max(lower, window.end - duration);
+ 		const maxStart = Math.min(window.start, upper - duration);
+ 		const canExpand = duration >= window.end - window.start && minStart <= maxStart;
+-		const expandedStart = Math.max(
+-			minStart,
+-			Math.min(cluster.anchorMs - duration / 2, maxStart),
+-		);
++		const preferredStart = hasExplicitLead
++			? Math.min(cluster.anchorMs - lead, cluster.firstMs - lead)
++			: cluster.anchorMs - duration / 2;
++		const expandedStart = Math.max(minStart, Math.min(preferredStart, maxStart));
+ 		const regionStart = canCenter ? centeredStart : canExpand ? expandedStart : window.start;
+-		const regionEnd = canCenter
++		let regionEnd = canCenter
+ 			? centeredEnd
+ 			: canExpand
+ 				? expandedStart + duration
+ 				: window.end;
++		// A region ending on the final frame has no room to animate its zoom-out.
++		// Trim only when the tap still sits comfortably inside the shortened
++		// region; taps in the last fraction of a second keep their region and
++		// accept the cut rather than losing the zoom entirely.
++		if (
++			trailingReserveMs > 0 &&
++			cluster.anchorMs <= totalMs - trailingReserveMs - 400 &&
++			regionEnd > totalMs - trailingReserveMs
++		) {
++			regionEnd = Math.max(regionStart + 1, totalMs - trailingReserveMs);
++		}
+ 		if (reserved.some((span) => regionEnd > span.start && regionStart < span.end)) continue;
+ 
+ 		reserved.push({ start: regionStart, end: regionEnd });
+diff --git a/src/components/video-editor/touchZoomPolicy.test.ts b/src/components/video-editor/touchZoomPolicy.test.ts
+new file mode 100644
+index 0000000..63540c7
+--- /dev/null
++++ b/src/components/video-editor/touchZoomPolicy.test.ts
+@@ -0,0 +1,134 @@
++import { describe, expect, it } from "vitest";
++import { buildInteractionZoomSuggestions } from "./timeline/zoomSuggestionUtils";
++import type { CursorTelemetryPoint } from "./types";
++import { ZOOM_DEPTH_SCALES } from "./types";
++import { clampFocusToScale } from "./videoPlayback/focusUtils";
++import {
++	TOUCH_CLICK_MERGE_GAP_MS,
++	TOUCH_CLICK_PAD_MS,
++	TOUCH_TRAILING_RESERVE_MS,
++	TOUCH_ZOOM_LEAD_MS,
++	touchZoomDepth,
++} from "./touchZoomPolicy";
++
++const click = (timeMs: number, cx = 0.5, cy = 0.5): CursorTelemetryPoint => ({
++	timeMs,
++	cx,
++	cy,
++	interactionType: "click",
++	mouseButton: 1,
++});
++
++const release = (timeMs: number, cx = 0.5, cy = 0.5): CursorTelemetryPoint => ({
++	timeMs,
++	cx,
++	cy,
++	interactionType: "mouseup",
++	mouseButton: 1,
++});
++
++function suggestions(samples: CursorTelemetryPoint[], totalMs: number, touch = true) {
++	return buildInteractionZoomSuggestions({
++		cursorTelemetry: samples,
++		totalMs,
++		defaultDurationMs: 2000,
++		...(touch
++			? {
++					mergeGapMs: TOUCH_CLICK_MERGE_GAP_MS,
++					padMs: TOUCH_CLICK_PAD_MS,
++					trailingReserveMs: TOUCH_TRAILING_RESERVE_MS,
++					leadMs: TOUCH_ZOOM_LEAD_MS,
++				}
++			: {}),
++	});
++}
++
++describe("touch auto-zoom policy", () => {
++	it("gives each tap 1.5 s apart its own zoom region", () => {
++		const samples = [
++			click(3000),
++			release(3080),
++			click(4500),
++			release(4580),
++			click(6000),
++			release(6080),
++		];
++		const result = suggestions(samples, 10_000);
++		expect(result.suggestions).toHaveLength(3);
++		for (const [index, region] of result.suggestions.entries()) {
++			const tap = [3000, 4500, 6000][index];
++			expect(region.start).toBeLessThanOrEqual(tap);
++			expect(region.end).toBeGreaterThanOrEqual(tap);
++			expect(region.end - region.start).toBeGreaterThanOrEqual(800);
++		}
++	});
++
++	it("starts a touch region with the tap, not a second before it", () => {
++		const samples = [click(3000), release(3080), click(7000), release(7080)];
++		const result = suggestions(samples, 12_000);
++		expect(result.suggestions).toHaveLength(2);
++		for (const [index, region] of result.suggestions.entries()) {
++			const tap = [3000, 7000][index];
++			expect(Math.abs(region.start - (tap - TOUCH_ZOOM_LEAD_MS))).toBeLessThanOrEqual(1);
++			expect(region.end - region.start).toBeGreaterThanOrEqual(1900);
++		}
++	});
++
++	it("keeps the desktop merge gap and centred lead when the host is not touch", () => {
++		const samples = [
++			click(3000),
++			release(3080),
++			click(4500),
++			release(4580),
++			click(6000),
++			release(6080),
++		];
++		expect(suggestions(samples, 10_000, false).suggestions).toHaveLength(1);
++		const isolated = suggestions([click(5000), release(5080)], 10_000, false);
++		expect(isolated.suggestions[0].start).toBe(4000);
++	});
++
++	it("ignores swipe movement with no tap", () => {
++		const samples: CursorTelemetryPoint[] = [
++			{ timeMs: 1000, cx: 0.5, cy: 0.7, interactionType: "move" },
++			{ timeMs: 1300, cx: 0.5, cy: 0.55, interactionType: "move" },
++			{ timeMs: 1600, cx: 0.5, cy: 0.4, interactionType: "move" },
++			{ timeMs: 1900, cx: 0.5, cy: 0.3, interactionType: "move" },
++			click(4000, 0.25, 0.6),
++			release(4080, 0.25, 0.6),
++		];
++		const result = suggestions(samples, 10_000);
++		expect(result.suggestions).toHaveLength(1);
++		expect(result.suggestions[0].focus).toEqual({ cx: 0.25, cy: 0.6 });
++	});
++
++	it("reserves room for the final zoom-out when the tap is not at the edge", () => {
++		const samples = [click(9200), release(9280)];
++		const result = suggestions(samples, 10_000);
++		expect(result.suggestions).toHaveLength(1);
++		expect(result.suggestions[0].end).toBeLessThanOrEqual(10_000 - TOUCH_TRAILING_RESERVE_MS);
++	});
++
++	it("brings edge taps within reach by choosing a deeper zoom", () => {
++		expect(touchZoomDepth({ cx: 0.5, cy: 0.5 })).toBe(1);
++		expect(touchZoomDepth({ cx: 0.5, cy: 0.35 })).toBe(1);
++		expect(touchZoomDepth({ cx: 0.5, cy: 0.267 })).toBe(2);
++		expect(touchZoomDepth({ cx: 0.5, cy: 0.2 })).toBe(3);
++		expect(touchZoomDepth({ cx: 0.9, cy: 0.9 })).toBe(3);
++	});
++
++	it("keeps the rendered focus close to the actual tap", () => {
++		const taps = [
++			{ cx: 0.5, cy: 0.5 },
++			{ cx: 0.5, cy: 0.2 },
++			{ cx: 0.5, cy: 0.9 },
++			{ cx: 0.9, cy: 0.5 },
++		];
++		for (const tap of taps) {
++			const depth = touchZoomDepth(tap);
++			const clamped = clampFocusToScale(tap, ZOOM_DEPTH_SCALES[depth]);
++			const error = Math.max(Math.abs(clamped.cx - tap.cx), Math.abs(clamped.cy - tap.cy));
++			expect(error).toBeLessThanOrEqual(0.19);
++		}
++	});
++});
+diff --git a/src/components/video-editor/touchZoomPolicy.ts b/src/components/video-editor/touchZoomPolicy.ts
+new file mode 100644
+index 0000000..10cfd36
+--- /dev/null
++++ b/src/components/video-editor/touchZoomPolicy.ts
+@@ -0,0 +1,77 @@
++import { ZOOM_DEPTH_SCALES, type ZoomDepth, type ZoomFocus } from "./types";
++
++/**
++ * Auto-zoom parameters for touch hosts.
++ *
++ * Android telemetry is tap-only: an accessibility click is the interaction, and
++ * there is no pointer track between taps. The desktop clustering merges clicks
++ * up to 2.5 s apart into one zoom region, which means a demo that taps every
++ * second or two gets one long zoom instead of a zoom in/out per tap. Touch uses
++ * a much shorter merge gap so each tap owns a region, while still merging rapid
++ * repeated taps (typing, double taps) into one.
++ *
++ * Desktop blocks are centred on the click: the zoom reaches full scale about a
++ * second before the click, while the pointer travels to the target. Touch has
++ * no pointer, so the camera would zoom with no visible cause and the tap
++ * indicator would arrive mid-hold. A short lead starts the zoom with the tap
++ * instead.
++ *
++ * The trailing reserve keeps the last region's zoom-out inside the recording
++ * instead of letting it be cut off by the final frame.
++ */
++export const TOUCH_CLICK_MERGE_GAP_MS = 800;
++export const TOUCH_CLICK_PAD_MS = 450;
++export const TOUCH_TRAILING_RESERVE_MS = 360;
++export const TOUCH_ZOOM_LEAD_MS = 200;
++
++/**
++ * True inside the Android WebView. `android.js` installs `__recordlyHost`
++ * before the React bundle; desktop Electron and the Chrome dev server do not.
++ */
++export function isTouchHost(): boolean {
++	return typeof window !== "undefined" && "__recordlyHost" in window;
++}
++
++export type TouchZoomParams = {
++	mergeGapMs?: number;
++	padMs?: number;
++	trailingReserveMs?: number;
++	leadMs?: number;
++};
++
++export function touchZoomParams(): TouchZoomParams {
++	if (!isTouchHost()) return {};
++	return {
++		mergeGapMs: TOUCH_CLICK_MERGE_GAP_MS,
++		padMs: TOUCH_CLICK_PAD_MS,
++		trailingReserveMs: TOUCH_TRAILING_RESERVE_MS,
++		leadMs: TOUCH_ZOOM_LEAD_MS,
++	};
++}
++
++/**
++ * Pick the shallowest depth that can still centre the tap.
++ *
++ * A zoom places the tap at the middle of the crop, so the reachable focus range
++ * for a depth is `[0.5/scale, 1 - 0.5/scale]`: 1.25× can only centre the middle
++ * 20% of the screen, 1.8× reaches the middle 44%. A touch target near an edge
++ * (a bottom navigation row, a side button) was previously clamped back toward
++ * the centre and read as "the zoom missed the tap". Choosing the shallowest
++ * depth whose clamp keeps the target within a tenth of the frame keeps central
++ * taps gentle while letting edge taps land.
++ *
++ * The 1.8× cap keeps an edge tap from becoming a disorienting close-up.
++ */
++export function touchZoomDepth(focus: ZoomFocus): ZoomDepth {
++	const cx = Math.max(0, Math.min(focus.cx, 1));
++	const cy = Math.max(0, Math.min(focus.cy, 1));
++	for (const depth of [1, 2, 3] as const) {
++		const margin = 1 / (2 * ZOOM_DEPTH_SCALES[depth]);
++		const error = Math.max(
++			Math.abs(Math.max(margin, Math.min(cx, 1 - margin)) - cx),
++			Math.abs(Math.max(margin, Math.min(cy, 1 - margin)) - cy),
++		);
++		if (error <= 0.1 + 1e-6) return depth;
++	}
++	return 3;
++}
+diff --git a/src/hooks/startNativeRecorder.ts b/src/hooks/startNativeRecorder.ts
+index 263f196..1c4c732 100644
+--- a/src/hooks/startNativeRecorder.ts
++++ b/src/hooks/startNativeRecorder.ts
+@@ -1,4 +1,5 @@
+ import { toast } from "@/components/ui/toast";
++import { isTouchHost } from "@/components/video-editor/touchZoomPolicy";
+ import { translate } from "@/i18n/runtime";
+ import type { RecorderContext } from "./recorderContext";
+ export async function startNativeRecorder(
+@@ -78,6 +79,23 @@ export async function startNativeRecorder(
+ 		return "finished";
+ 	}
+ 	if (!nativeResult.success) {
++		if (isTouchHost()) {
++			// A WebView has no getDisplayMedia screen-capture path, so falling
++			// back to browser capture can only produce a second, misleading
++			// error. A dismissed consent dialog stops cleanly; any other native
++			// failure surfaces its actual message.
++			if (nativeResult.canceled) {
++				setRecording(false);
++				cleanupCapturedMedia();
++				await stopWebcamRecorder();
++				return "finished";
++			}
++			throw new Error(
++				nativeResult.error ??
++					nativeResult.message ??
++					"Failed to start native screen recording",
++			);
++		}
+ 		if (useNativeWindowsCapture) {
+ 			console.warn(
+ 				"Native Windows capture failed, falling back to browser capture:",
+diff --git a/vite.android.config.mjs b/vite.android.config.mjs
+new file mode 100644
+index 0000000..80dc170
+--- /dev/null
++++ b/vite.android.config.mjs
+@@ -0,0 +1,24 @@
++/**
++ * Android renderer build. Upstream's production recorder requires a cloud
++ * session, which this sideloaded offline app cannot obtain. Keep upstream's
++ * UI build and its development recorder gate until that check is made local.
++ */
++import { fileURLToPath } from "node:url";
++
++// The Vite module runner leaves CommonJS's __dirname undefined in the
++// upstream config. Give it the directory esbuild's default config loader
++// would have supplied before importing that config.
++globalThis.__dirname = fileURLToPath(new URL(".", import.meta.url));
++const { default: upstream } = await import("./vite.config.ts");
++
++export default async function androidConfig(env) {
++	const config = typeof upstream === "function" ? await upstream(env) : upstream;
++	return {
++		...config,
++		define: {
++			...config.define,
++			"import.meta.env.DEV": "true",
++			"import.meta.env.PROD": "false",
++		},
++	};
++}

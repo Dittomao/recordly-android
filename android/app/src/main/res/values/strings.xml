@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">Recordly</string>
+    <string name="telemetry_service_label">Recordly tap tracking</string>
+    <!-- Shown in the system Accessibility settings list. It must describe what
+         the service does, because this is the screen a user decides on. -->
+    <string name="telemetry_service_description">Records where you tap so Recordly can auto-zoom your recordings toward what you touched. Tap positions never leave this device.</string>
+</resources>
