@@ -1,0 +1,4 @@
+# The renderer patch is applied with `git apply`, which matches context
+# byte-for-byte. Windows checkouts with core.autocrlf=true would otherwise
+# convert it to CRLF and every hunk would fail. -text keeps the blob as-is.
+patches/*.patch -text

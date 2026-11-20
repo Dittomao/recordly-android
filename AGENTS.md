@@ -42,6 +42,10 @@ Check the patch landed:
 git -C recordly-upstream apply --check -R ../patches/recordly-android.patch
 ```
 
+`.gitattributes` marks `patches/*.patch` as `-text` so a Windows checkout keeps
+the LF bytes `git apply` needs. Keep it LF when regenerating; a CRLF patch fails
+every hunk.
+
 Toolchain: Android Studio's bundled JDK (21), Android SDK platform 35,
 Node.js 20+ (the workspace used Node 24), and the
 `Medium_Phone_API_37.0` AVD. Export needs Android System WebView 130+.

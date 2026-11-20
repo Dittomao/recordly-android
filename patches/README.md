@@ -37,9 +37,13 @@ git -C recordly-upstream diff --binary > patches/recordly-android.patch
 git -C recordly-upstream reset
 ```
 
-Use raw redirection (`cmd /c` on Windows) so the patch is UTF-8, not UTF-16.
-Check that it matches the working tree in reverse:
+Use raw redirection (`cmd /c` on Windows) so the patch is UTF-8, not UTF-16,
+and keep it LF. The repository marks `patches/*.patch` as `-text` so a Windows
+checkout does not convert it to CRLF, which would make every hunk fail. Check
+that it matches the working tree in reverse, and that it applies to a pristine
+upstream checkout:
 
 ```sh
 git -C recordly-upstream apply --check -R ../patches/recordly-android.patch
+git -C <clean-upstream-at-pinned-commit> apply --check ../patches/recordly-android.patch
 ```
