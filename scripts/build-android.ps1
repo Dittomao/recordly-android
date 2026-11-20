@@ -13,6 +13,22 @@ if (-not (Test-Path -LiteralPath (Join-Path $javaRoot 'bin\java.exe'))) {
     throw 'Set JAVA_HOME to Android Studio''s bundled JDK.'
 }
 
+# A fresh clone has no android/local.properties (it is ignored), so Gradle
+# cannot find the SDK. Derive it from the environment or the standard install
+# path and write the file before Gradle runs.
+$sdkRoot = $env:ANDROID_HOME
+if (-not $sdkRoot) { $sdkRoot = $env:ANDROID_SDK_ROOT }
+if (-not $sdkRoot) { $sdkRoot = Join-Path $env:LOCALAPPDATA 'Android\Sdk' }
+if (-not (Test-Path -LiteralPath $sdkRoot)) {
+    throw 'Android SDK not found. Set ANDROID_HOME to the SDK directory.'
+}
+$localProperties = Join-Path $androidRoot 'local.properties'
+if (-not (Test-Path -LiteralPath $localProperties)) {
+    $escapedSdk = $sdkRoot -replace '\\', '\\' -replace ':', '\:'
+    Set-Content -LiteralPath $localProperties -Value "sdk.dir=$escapedSdk" -Encoding ascii
+    Write-Host "Wrote $localProperties"
+}
+
 $androidUserRoot = Join-Path $androidRoot '.android-home'
 New-Item -ItemType Directory -Path $androidUserRoot -Force | Out-Null
 

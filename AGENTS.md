@@ -49,6 +49,8 @@ every hunk.
 Toolchain: Android Studio's bundled JDK (21), Android SDK platform 35,
 Node.js 20+ (the workspace used Node 24), and the
 `Medium_Phone_API_37.0` AVD. Export needs Android System WebView 130+.
+`android/local.properties` is ignored; `scripts/build-android.ps1` writes it
+from `ANDROID_HOME` (or `%LOCALAPPDATA%\Android\Sdk`) when it is missing.
 
 ## Build
 
