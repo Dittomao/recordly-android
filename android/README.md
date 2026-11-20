@@ -107,11 +107,11 @@ treating the API level as the gate.
   a long-lived install will accumulate them.
 - Replace the Android build's forced development flags with a local recorder
   permission gate before release.
-- Phone polish beyond the shell: desktop-only settings entries (taskbar
-  behavior and update controls) are still visible on Android and should be
-  hidden or explained.
-- Investigate an intermittent emulator ANR during rapid library and document
-  picker transitions; a fresh launch completed the same import flow.
+- Emulator ANRs seen during verification coincided with host memory pressure
+  (the system process itself stopped responding); reproduce with host headroom
+  before treating one as an app bug.
+- Investigate the dashboard card's "Add folder" affordance, which still assumes
+  desktop organization.
 - Real-device validation of touch telemetry accuracy; model downloads, cloud,
   and auto-updates.
 
@@ -362,8 +362,24 @@ the export/settings dialogs fit. Evidence:
 `mobile-dashboard-nav.png`, `mobile-dashboard-settings-2.png`,
 `mobile-export-dialog.png`, `mobile-settings-dialog.png`.
 
-Remaining polish: a few desktop-only settings entries (taskbar behavior,
-updates) are still visible on Android, and real-device validation is pending.
+Remaining polish: real-device validation is pending, and the dashboard card's
+"Add folder" affordance still assumes desktop organization.
+
+### Mobile settings (2026-11-20)
+
+The editor and dashboard settings now hide desktop-only surfaces on touch:
+
+- `ApplicationSettings` (taskbar/Dock, launch at login) is not rendered.
+- Updates, Shortcuts, and Account categories are removed from the tab list.
+- The Storage folder pickers are hidden; Android keeps recordings/projects in
+  app-private storage and the library is the entry point.
+- General keeps Appearance and Language; Recording and Motion keep their
+  controls.
+
+Verified on the API 37 emulator at 411 px: the dialog tabs are General,
+Recording, Motion, Dev (debug only); General shows Appearance and Language only,
+with no taskbar, updates, shortcut, account or folder rows. Evidence:
+`dev/verification/settings-mobile2.png`.
 
 ### Auto-zoom on touch (2026-11-19)
 
