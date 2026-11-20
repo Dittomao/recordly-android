@@ -146,7 +146,7 @@ await delay(1_500);
 const pid = (await shell(["pidof", packageName])).stdout.trim().split(/\s+/)[0];
 assert.ok(pid, "Start Recordly on the emulator first");
 await forward(9222, `localabstract:webview_devtools_remote_${pid}`);
-const browser = await chromium.connectOverCDP("http://127.0.0.1:9222", { timeout: 10_000 });
+const browser = await chromium.connectOverCDP("http://127.0.0.1:9222", { timeout: 30_000 });
 let completed = false;
 let page = null;
 try {
@@ -159,9 +159,14 @@ try {
 	assert.ok(page, "Recordly renderer not found");
 	if (!page.url().includes("windowType=hud-overlay")) {
 		for (let attempt = 0; attempt < 3 && !page.url().includes("windowType=hud-overlay"); attempt++) {
-			await page.evaluate(() => {
-				setTimeout(() => window.electronAPI.showRecordingHud(), 100);
-			});
+			await page
+				.evaluate(() => {
+					setTimeout(() => window.electronAPI.showRecordingHud(), 100);
+				})
+				.catch(() => {
+					// The HUD switch reloads the WebView; on a slow emulator the
+					// navigation can begin before evaluate returns its reply.
+				});
 			try {
 				await page.waitForURL(/windowType=hud-overlay/, { timeout: 8_000 });
 			} catch {
@@ -179,19 +184,31 @@ try {
 
 	await shell(["logcat", "-c"]);
 	await page.getByRole("button", { name: "Record", exact: true }).click({ timeout: 10_000 });
-	const consentDeadline = Date.now() + 30_000;
+	const consentDeadline = Date.now() + 60_000;
 	while (Date.now() < consentDeadline) {
 		const nodes = await androidNodes();
 		const find = (text) => nodes.find((node) => node.text === text);
-		const next =
-			find("While using the app") ||
-			find("Allow") ||
-			find("Share screen") ||
-			find("Share entire screen") ||
-			find("Share one app");
-		if (next) await tapNode(next);
+		const tap = async (node) => {
+			if (node) await tapNode(node);
+			return Boolean(node);
+		};
+		// Android 16's sheet defaults to "Share one app" behind a spinner.
+		// Open it, pick "Share entire screen", then confirm with Next/Share.
+		// Older images expose "Share screen" directly.
+		const oneApp = find("Share one app");
+		const entireScreen = find("Share entire screen");
+		let acted = false;
+		if (find("While using the app")) acted = await tap(find("While using the app"));
+		else if (find("Allow")) acted = await tap(find("Allow"));
+		else if (oneApp && entireScreen) acted = await tap(entireScreen);
+		else if (oneApp) acted = await tap(oneApp);
+		else if (find("Next")) acted = await tap(find("Next"));
+		else if (find("Share screen")) acted = await tap(find("Share screen"));
+		else if (find("Share")) acted = await tap(find("Share"));
+		else if (find("Start now")) acted = await tap(find("Start now"));
+		else if (entireScreen) acted = await tap(entireScreen);
 		if (/capture started/.test(await captureLog())) break;
-		await delay(300);
+		await delay(acted ? 600 : 300);
 	}
 	await waitForLog(/capture resumed/);
 	await delay(1_500);

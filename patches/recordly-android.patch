@@ -344,6 +344,170 @@ index adc022f..21426ee 100644
  					>
  						<GearSix weight="fill" className="size-[18px]" aria-hidden="true" />
  						{uiText("ui.settings")}
+diff --git a/src/components/video-editor/dashboard/ProjectCard.tsx b/src/components/video-editor/dashboard/ProjectCard.tsx
+index b19468c..9f045df 100644
+--- a/src/components/video-editor/dashboard/ProjectCard.tsx
++++ b/src/components/video-editor/dashboard/ProjectCard.tsx
+@@ -16,6 +16,7 @@ import { ProjectPreviewGlass } from "./ProjectPreviewGlass";
+ import { ProjectThumbnail } from "./ProjectThumbnail";
+ import { PROJECT_DRAG_TYPE } from "./projectDrag";
+ import { RawThumbnail } from "./RawRecordings";
++import { isTouchHost } from "../touchZoomPolicy";
+ import type { DashboardProps } from "./types";
+ import type { DashboardModel } from "./useDashboardModel";
+ 
+@@ -54,6 +55,7 @@ export function ProjectCard({
+ 	assignFolder,
+ }: Props) {
+ 	const { locale, t: uiText } = useUiLocale();
++	const touchHost = isTouchHost();
+ 	const [hovering, setHovering] = useState(false);
+ 	const [dragging, setDragging] = useState(false);
+ 	const suppressClickUntil = useRef(0);
+@@ -258,59 +260,61 @@ export function ProjectCard({
+ 									name={entry.name}
+ 									onRemove={(id) => assignFolder(entry.path, id)}
+ 								/>
+-								<Dropdown>
+-									<Button
+-										variant="ghost"
+-										size="sm"
+-										aria-label={uiText("ui.addFolderTo", undefined, {
+-											name: entry.name,
+-										})}
+-										className="h-6 min-w-0 shrink-0 gap-1.5 rounded-full px-2.5 text-[11px] text-muted-foreground opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100"
+-									>
+-										<Plus className="size-3" />
+-										{uiText("ui.addFolder")}
+-									</Button>
+-									<Dropdown.Popover>
+-										<Dropdown.Menu
+-											aria-label={uiText("ui.assignProjectFolder")}
++								{!touchHost && (
++									<Dropdown>
++										<Button
++											variant="ghost"
++											size="sm"
++											aria-label={uiText("ui.addFolderTo", undefined, {
++												name: entry.name,
++											})}
++											className="h-6 min-w-0 shrink-0 gap-1.5 rounded-full px-2.5 text-[11px] text-muted-foreground opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100"
+ 										>
+-											{folders.map((item) => (
+-												<Dropdown.Item
+-													key={item.id}
+-													id={item.id}
+-													textValue={item.name}
+-													onAction={() =>
+-														assignFolder(entry.path, item.id)
+-													}
+-												>
+-													<FolderSimple
+-														weight="fill"
+-														style={{ color: item.color }}
+-													/>
+-													{item.name}
+-													{item.paths.includes(entry.path) && (
+-														<Check className="size-3" />
+-													)}
+-												</Dropdown.Item>
+-											))}
+-											{folder && (
+-												<Dropdown.Item
+-													id="remove"
+-													onAction={() =>
+-														assignFolder(entry.path, "none")
+-													}
+-												>
+-													{uiText("ui.removeFromAllFolders")}
+-												</Dropdown.Item>
+-											)}
+-											{!folders.length && (
+-												<Dropdown.Item id="empty" isDisabled>
+-													{uiText("ui.createAFolderInTheSidebar")}
+-												</Dropdown.Item>
+-											)}
+-										</Dropdown.Menu>
+-									</Dropdown.Popover>
+-								</Dropdown>
++											<Plus className="size-3" />
++											{uiText("ui.addFolder")}
++										</Button>
++										<Dropdown.Popover>
++											<Dropdown.Menu
++												aria-label={uiText("ui.assignProjectFolder")}
++											>
++												{folders.map((item) => (
++													<Dropdown.Item
++														key={item.id}
++														id={item.id}
++														textValue={item.name}
++														onAction={() =>
++															assignFolder(entry.path, item.id)
++														}
++													>
++														<FolderSimple
++															weight="fill"
++															style={{ color: item.color }}
++														/>
++														{item.name}
++														{item.paths.includes(entry.path) && (
++															<Check className="size-3" />
++														)}
++													</Dropdown.Item>
++												))}
++												{folder && (
++													<Dropdown.Item
++														id="remove"
++														onAction={() =>
++															assignFolder(entry.path, "none")
++														}
++													>
++														{uiText("ui.removeFromAllFolders")}
++													</Dropdown.Item>
++												)}
++												{!folders.length && (
++													<Dropdown.Item id="empty" isDisabled>
++														{uiText("ui.createAFolderInTheSidebar")}
++													</Dropdown.Item>
++												)}
++											</Dropdown.Menu>
++										</Dropdown.Popover>
++									</Dropdown>
++								)}
+ 							</>
+ 						)}
+ 					</div>
+@@ -350,6 +354,29 @@ export function ProjectCard({
+ 									>
+ 										{uiText("ui.rename")}
+ 									</Dropdown.Item>
++									{touchHost && folders.length > 0 && (
++										<Dropdown.Section aria-label={uiText("ui.folders")}>
++											{folders.map((item) => (
++												<Dropdown.Item
++													key={item.id}
++													id={`folder-${item.id}`}
++													textValue={item.name}
++													onAction={() =>
++														assignFolder(entry.path, item.id)
++													}
++												>
++													<FolderSimple
++														weight="fill"
++														style={{ color: item.color }}
++													/>
++													{item.name}
++													{item.paths.includes(entry.path) && (
++														<Check className="size-3" />
++													)}
++												</Dropdown.Item>
++											))}
++										</Dropdown.Section>
++									)}
+ 									{!entry.rawSource && (
+ 										<Dropdown.Item
+ 											id="share"
 diff --git a/src/components/video-editor/dashboard/generateProjectThumbnail.ts b/src/components/video-editor/dashboard/generateProjectThumbnail.ts
 index c9babf0..cb8420e 100644
 --- a/src/components/video-editor/dashboard/generateProjectThumbnail.ts

@@ -110,8 +110,8 @@ treating the API level as the gate.
 - Emulator ANRs seen during verification coincided with host memory pressure
   (the system process itself stopped responding); reproduce with host headroom
   before treating one as an app bug.
-- Investigate the dashboard card's "Add folder" affordance, which still assumes
-  desktop organization.
+- The dashboard card's folder assignment is in the card's options menu on
+  touch, so there is no hover-only control to hunt for.
 - Real-device validation of touch telemetry accuracy; model downloads, cloud,
   and auto-updates.
 
@@ -362,8 +362,7 @@ the export/settings dialogs fit. Evidence:
 `mobile-dashboard-nav.png`, `mobile-dashboard-settings-2.png`,
 `mobile-export-dialog.png`, `mobile-settings-dialog.png`.
 
-Remaining polish: real-device validation is pending, and the dashboard card's
-"Add folder" affordance still assumes desktop organization.
+Remaining polish: real-device validation is pending.
 
 ### Mobile settings (2026-11-20)
 
@@ -380,6 +379,14 @@ Verified on the API 37 emulator at 411 px: the dialog tabs are General,
 Recording, Motion, Dev (debug only); General shows Appearance and Language only,
 with no taskbar, updates, shortcut, account or folder rows. Evidence:
 `dev/verification/settings-mobile2.png`.
+
+### Project cards on touch (2026-11-20)
+
+Project cards no longer render the hover-only "Add folder" pill on touch.
+Folder assignment moved into the card's ••• menu as a checkable list, and the
+folder chips still remove an assignment with a tap. `tsc` and the renderer build
+pass; the emulator click-through was blocked by host memory pressure (see
+Verification limits).
 
 ### Auto-zoom on touch (2026-11-19)
 

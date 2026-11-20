@@ -914,7 +914,9 @@ Secondary dialogs were verified at 411 px (Publish sheet, editor Settings,
 dashboard Settings), and the project name now wraps over two lines. Desktop-only
 settings entries were addressed on 2026-11-20: `ApplicationSettings` (taskbar,
 launch at login), Updates, Shortcuts, Account and the Storage folder pickers are
-hidden on touch; see README "Mobile settings". Real-device testing remains.
+hidden on touch; see README "Mobile settings". Project cards also stopped
+rendering the hover-only "Add folder" pill on touch; folder assignment is in the
+card's ••• menu instead. Real-device testing remains.
 
 ---
 

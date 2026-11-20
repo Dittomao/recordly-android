@@ -81,8 +81,9 @@ See `patches/README.md` for regenerating the patch.
 - Export requires Android System WebView 130+ (`VideoEncoder` is on by default).
 - Enable the accessibility service for tap telemetry; without it the recording
   has no zoom regions.
-- On Android 14+ choose **Share entire screen → Share screen** in the system
-  consent dialog.
+- On Android 14+ the consent sheet defaults to **Share one app**; choose
+  **Share entire screen**, then **Next/Share**. The auto-zoom verifier drives
+  this sequence.
 - The emulator's H.264 encoder is 720p-class; the app defaults to HD there and
   FHD on real devices.
 - `node --test bridge/` fails on Node 24 with `MODULE_NOT_FOUND`; name the two
