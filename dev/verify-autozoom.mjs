@@ -30,16 +30,30 @@ const decode = (text) =>
 		.replaceAll("&apos;", "'");
 
 async function androidNodes() {
-	await shell(["uiautomator", "dump", "/sdcard/recordly-window.xml"]);
-	const xml = (await execOut(["cat", "/sdcard/recordly-window.xml"])).toString();
-	return [...xml.matchAll(/<node\b([^>]*)>/g)].map((match) =>
-		Object.fromEntries(
-			[...match[1].matchAll(/([\w:-]+)="([^"]*)"/g)].map((attribute) => [
-				attribute[1],
-				decode(attribute[2]),
-			]),
-		),
-	);
+	let lastError;
+	for (let attempt = 0; attempt < 5; attempt++) {
+		try {
+			await shell(["rm", "-f", "/sdcard/recordly-window.xml"]);
+			const dump = await shell(["uiautomator", "dump", "/sdcard/recordly-window.xml"]);
+			if (dump.code === 0) {
+				const xml = (await execOut(["cat", "/sdcard/recordly-window.xml"])).toString();
+				if (xml.includes("<hierarchy")) {
+					return [...xml.matchAll(/<node\b([^>]*)>/g)].map((match) =>
+						Object.fromEntries(
+							[...match[1].matchAll(/([\w:-]+)="([^"]*)"/g)].map((attribute) => [
+								attribute[1],
+								decode(attribute[2]),
+							]),
+						),
+					);
+				}
+			}
+		} catch (error) {
+			lastError = error;
+		}
+		await delay(400);
+	}
+	throw new Error(`Could not read the Android window: ${lastError ?? "empty hierarchy"}`);
 }
 
 async function tapNode(node) {
@@ -185,6 +199,7 @@ try {
 	await shell(["logcat", "-c"]);
 	await page.getByRole("button", { name: "Record", exact: true }).click({ timeout: 10_000 });
 	const consentDeadline = Date.now() + 60_000;
+	let sourceSheetOpened = false;
 	while (Date.now() < consentDeadline) {
 		const nodes = await androidNodes();
 		const find = (text) => nodes.find((node) => node.text === text);
@@ -193,22 +208,36 @@ try {
 			return Boolean(node);
 		};
 		// Android 16's sheet defaults to "Share one app" behind a spinner.
-		// Open it, pick "Share entire screen", then confirm with Next/Share.
+		// Open it once, pick "Share entire screen", then confirm with Next/Share.
 		// Older images expose "Share screen" directly.
 		const oneApp = find("Share one app");
 		const entireScreen = find("Share entire screen");
 		let acted = false;
-		if (find("While using the app")) acted = await tap(find("While using the app"));
-		else if (find("Allow")) acted = await tap(find("Allow"));
-		else if (oneApp && entireScreen) acted = await tap(entireScreen);
-		else if (oneApp) acted = await tap(oneApp);
-		else if (find("Next")) acted = await tap(find("Next"));
-		else if (find("Share screen")) acted = await tap(find("Share screen"));
-		else if (find("Share")) acted = await tap(find("Share"));
-		else if (find("Start now")) acted = await tap(find("Start now"));
-		else if (entireScreen) acted = await tap(entireScreen);
+		if (find("While using the app")) {
+			acted = await tap(find("While using the app"));
+		} else if (find("Allow")) {
+			acted = await tap(find("Allow"));
+		} else if (oneApp && entireScreen) {
+			acted = await tap(entireScreen);
+			sourceSheetOpened = false;
+		} else if (oneApp && !sourceSheetOpened) {
+			acted = await tap(oneApp);
+			sourceSheetOpened = true;
+		} else if (find("Next")) {
+			acted = await tap(find("Next"));
+			sourceSheetOpened = false;
+		} else if (find("Share screen")) {
+			acted = await tap(find("Share screen"));
+		} else if (find("Share")) {
+			acted = await tap(find("Share"));
+		} else if (find("Start now")) {
+			acted = await tap(find("Start now"));
+		} else if (entireScreen) {
+			acted = await tap(entireScreen);
+			sourceSheetOpened = false;
+		}
 		if (/capture started/.test(await captureLog())) break;
-		await delay(acted ? 600 : 300);
+		await delay(acted ? (sourceSheetOpened ? 1_500 : 600) : 300);
 	}
 	await waitForLog(/capture resumed/);
 	await delay(1_500);
