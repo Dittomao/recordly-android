@@ -20,6 +20,8 @@ capture, tap telemetry, project storage, a loopback media server, and export.
 | `dev/` | emulator verifiers and inspection tools |
 | `patches/` | renderer changes as a patch against the pinned upstream commit |
 | `PORTING-PLAN.md` | full bridge inventory, decisions, and history |
+| `AGENTS.md` | handoff: fresh checkout, gates, rules, known limits |
+| `LICENSE.md` | AGPL-3.0, inherited from the Recordly renderer |
 
 ## Build
 
