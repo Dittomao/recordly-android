@@ -27,7 +27,7 @@ Requirements: Android Studio with its bundled JDK, Android SDK platform 35,
 Node.js 20+, and a WebView 130+ device or emulator for export.
 
 ```sh
-node scripts/build-renderer.mjs          # optional; the APK build does this when stale
+node scripts/build-renderer.mjs          # optional; the APK build rebuilds and repackages when stale
 powershell.exe -ExecutionPolicy Bypass -File scripts/build-android.ps1 -Offline
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```

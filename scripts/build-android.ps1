@@ -48,6 +48,27 @@ if ($needsRenderer) {
     }
 }
 
+# Gradle can report assembleDebug up-to-date when only assets changed, leaving
+# the previous renderer in the APK. If the asset tree is newer than the APK,
+# drop the asset-merge and packaging outputs so the next build re-merges and
+# repackages. Kotlin and other incremental outputs are untouched.
+$debugApk = Join-Path $androidRoot 'app\build\outputs\apk\debug\app-debug.apk'
+if (@($Tasks) -contains ':app:assembleDebug') {
+    $newestAsset = Get-ChildItem -LiteralPath $rendererAssets -Recurse -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
+    $apkTime = if (Test-Path -LiteralPath $debugApk) {
+        (Get-Item -LiteralPath $debugApk).LastWriteTimeUtc
+    } else {
+        $null
+    }
+    if (-not $apkTime -or ($newestAsset -and $newestAsset.LastWriteTimeUtc -gt $apkTime)) {
+        Write-Host 'Renderer assets are newer than the debug APK; forcing repackage...'
+        Remove-Item -Recurse -Force (Join-Path $androidRoot 'app\build\intermediates\assets\debug\mergeDebugAssets') -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force (Join-Path $androidRoot 'app\build\intermediates\apk\debug') -ErrorAction SilentlyContinue
+        Remove-Item -Force $debugApk -ErrorAction SilentlyContinue
+    }
+}
+
 $signingRoot = Join-Path $androidRoot '.build-signing'
 New-Item -ItemType Directory -Path $signingRoot -Force | Out-Null
 $debugKey = Join-Path $signingRoot 'recordly-debug.keystore'

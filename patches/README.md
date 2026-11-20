@@ -23,7 +23,8 @@ node scripts/build-renderer.mjs
 ```
 
 `scripts/build-android.ps1` also builds the renderer automatically when the
-bundle is missing or older than the renderer/bridge sources.
+bundle is missing or older than the renderer/bridge sources, and forces an asset
+merge and repackage when the bundle is newer than the debug APK.
 
 ## Regenerating
 

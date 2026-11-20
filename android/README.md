@@ -17,9 +17,11 @@ powershell.exe -ExecutionPolicy Bypass -File scripts/build-android.ps1 -Offline
 ```
 
 `node scripts/build-renderer.mjs --skip-build` copies an existing renderer
-`dist/` into Android assets. `scripts/build-android.ps1` now checks the generated
+`dist/` into Android assets. `scripts/build-android.ps1` checks the generated
 renderer and bridge assets first: if they are missing, or older than the
-renderer/bridge sources, it runs the renderer build before Gradle. Always edit
+renderer/bridge sources, it runs the renderer build before Gradle. When the asset
+tree is newer than the debug APK, it also drops the merged-asset and packaging
+outputs, so Gradle cannot report the previous APK up-to-date. Always edit
 `bridge/bridge.js`, then rerun the copy step; edits to the generated asset are
 overwritten.
 
