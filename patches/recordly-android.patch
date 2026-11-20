@@ -569,7 +569,7 @@ index 16331f8..a97438c 100644
  	for (const suggestion of result.suggestions) {
  		input.onZoomSuggested({ start: suggestion.start, end: suggestion.end }, suggestion.focus);
 diff --git a/src/components/video-editor/hooks/useZoomRegionCommands.ts b/src/components/video-editor/hooks/useZoomRegionCommands.ts
-index 0faae69..380d439 100644
+index 0faae69..7a20fd9 100644
 --- a/src/components/video-editor/hooks/useZoomRegionCommands.ts
 +++ b/src/components/video-editor/hooks/useZoomRegionCommands.ts
 @@ -10,6 +10,7 @@ import {
@@ -580,14 +580,15 @@ index 0faae69..380d439 100644
  import { getZoomFocusSpace } from "../videoPlayback/focusUtils";
  
  interface UseZoomRegionCommandsParams {
-@@ -90,12 +91,16 @@ export function useZoomRegionCommands({
+@@ -90,14 +91,20 @@ export function useZoomRegionCommands({
  
  	const handleZoomSuggested = useCallback(
  		(span: Span, focus: ZoomFocus) => {
 +			// Touch keeps more context when it can: 1.25x for a central target,
 +			// progressively deeper when the target is near an edge so the camera
-+			// can actually reach it. The Windows reference sits around 1.1-1.35x.
-+			const depth = isTouchHost() ? touchZoomDepth(focus) : DEFAULT_AUTO_ZOOM_DEPTH;
++			// can actually reach it. Sampled Windows moves settle around 1.5x.
++			const touch = isTouchHost();
++			const depth = touch ? touchZoomDepth(focus) : DEFAULT_AUTO_ZOOM_DEPTH;
  			const newRegion: ZoomRegion = {
  				id: `zoom-${nextZoomIdRef.current++}`,
  				startMs: Math.round(span.start),
@@ -598,7 +599,10 @@ index 0faae69..380d439 100644
 +				focus: clampFocusToDepth(focus, depth),
  				focusSpace: "source",
  				mode: "auto",
++				...(touch ? { fitTransitions: true } : {}),
  			};
+ 			setZoomRegions((current) => [...current, newRegion]);
+ 		},
 diff --git a/src/components/video-editor/layout/EditorShell.tsx b/src/components/video-editor/layout/EditorShell.tsx
 index d2145ba..44d7c5f 100644
 --- a/src/components/video-editor/layout/EditorShell.tsx
@@ -914,6 +918,18 @@ index 4f27a1a..2f6061c 100644
  		const previewHandle = videoPlaybackRef.current;
  		const previewVideo = previewHandle?.video ?? null;
  
+diff --git a/src/components/video-editor/projectTimelineNormalization.ts b/src/components/video-editor/projectTimelineNormalization.ts
+index 6a3caca..d05e521 100644
+--- a/src/components/video-editor/projectTimelineNormalization.ts
++++ b/src/components/video-editor/projectTimelineNormalization.ts
+@@ -53,6 +53,7 @@ export function normalizeProjectTimeline(editor: Partial<ProjectEditorState>) {
+ 							region.focusSpace === "source" || region.focusSpace === "viewport"
+ 								? region.focusSpace
+ 								: undefined,
++						...(region.fitTransitions === true ? { fitTransitions: true as const } : {}),
+ 					};
+ 				})
+ 		: [];
 diff --git a/src/components/video-editor/settings/AppSettings.tsx b/src/components/video-editor/settings/AppSettings.tsx
 index 8fa126b..9b8ab5d 100644
 --- a/src/components/video-editor/settings/AppSettings.tsx
@@ -1051,45 +1067,122 @@ index 344d35b..1dbc843 100644
  function normalizeRowCount(rowCount: number) {
  	if (!Number.isFinite(rowCount)) {
 diff --git a/src/components/video-editor/timeline/zoomSuggestionUtils.ts b/src/components/video-editor/timeline/zoomSuggestionUtils.ts
-index 41ab1d2..2d506ee 100644
+index 41ab1d2..ceb81c3 100644
 --- a/src/components/video-editor/timeline/zoomSuggestionUtils.ts
 +++ b/src/components/video-editor/timeline/zoomSuggestionUtils.ts
-@@ -244,6 +244,14 @@ export function buildInteractionZoomSuggestions(params: {
+@@ -5,6 +5,7 @@ import {
+ 	getClipSourceStartMs,
+ 	type ZoomFocus,
+ } from "../types";
++import type { TouchZoomParams } from "../touchZoomPolicy";
+ import { getCursorPressIntervals } from "../videoPlayback/cursorPress";
+ import { detectInteractionCandidates } from "./cursorInteractionCandidates";
+ 
+@@ -234,6 +235,63 @@ function buildClickClusters(
+ 	return clusters;
+ }
+ 
++type InteractionGroup = {
++	candidates: CursorInteractionCandidate[];
++	start: number;
++	end: number;
++};
++
++/**
++ * Keep the approach anchored to the tap and buy room by shortening the prior
++ * hold instead. Cuts and existing zooms are hard boundaries. A tap too close
++ * to an ending keeps its ripple without starting a move that cannot return.
++ */
++function scheduleTouchSuggestions(
++	groups: InteractionGroup[],
++	reserved: { start: number; end: number }[],
++	totalMs: number,
++	defaultDurationMs: number,
++	mergeGapMs: number,
++	timing: NonNullable<TouchZoomParams["touchTiming"]>,
++): SuggestedZoomRegion[] {
++	const suggestions: SuggestedZoomRegion[] = [];
++	for (const group of groups) {
++		const scheduleSlot = (start: number, end: number) => {
++			if (start >= end) return;
++			const clusters = buildClickClusters(
++				group.candidates.filter(
++					({ centerTimeMs }) => centerTimeMs >= start && centerTimeMs < end,
++				),
++				mergeGapMs,
++			);
++			for (const [index, cluster] of clusters.entries()) {
++				const next = clusters[index + 1];
++				const regionStart = Math.max(start, cluster.firstMs - timing.leadMs);
++				const earliestEnd = cluster.lastMs + timing.minAfterTapMs;
++				const slotEnd = next ? next.firstMs - timing.leadMs - timing.wideBeatMs : end;
++				const latestEnd =
++					!next && end === totalMs && earliestEnd <= end - timing.trailingReserveMs
++						? end - timing.trailingReserveMs
++						: slotEnd;
++				if (latestEnd < earliestEnd) continue;
++				const regionEnd = Math.min(
++					latestEnd,
++					Math.max(regionStart + defaultDurationMs, earliestEnd),
++				);
++				suggestions.push({ start: regionStart, end: regionEnd, focus: cluster.focus });
++			}
++		};
++		let start = group.start;
++		for (const blocker of reserved) {
++			if (blocker.end <= start || blocker.start >= group.end) continue;
++			scheduleSlot(start, blocker.start);
++			start = Math.max(start, blocker.end);
++		}
++		scheduleSlot(start, group.end);
++	}
++	return suggestions.sort((a, b) => a.start - b.start);
++}
++
+ export function buildInteractionZoomSuggestions(params: {
+ 	cursorTelemetry: CursorTelemetryPoint[];
+ 	/** Telemetry uses recording time; zoom blocks use the edited timeline. */
+@@ -244,6 +302,7 @@ export function buildInteractionZoomSuggestions(params: {
  	spacingMs?: number;
  	mergeGapMs?: number;
  	padMs?: number;
-+	/** Keep the final zoom-out inside the recording (touch hosts). */
-+	trailingReserveMs?: number;
-+	/**
-+	 * How long before the anchor the region starts. Desktop centres the block
-+	 * (duration / 2) so the zoom arrives while the pointer travels; touch uses
-+	 * a short lead so the zoom starts with the tap.
-+	 */
-+	leadMs?: number;
++	touchTiming?: TouchZoomParams["touchTiming"];
  }): InteractionZoomSuggestionResult {
  	const {
  		cursorTelemetry,
-@@ -254,6 +262,8 @@ export function buildInteractionZoomSuggestions(params: {
+@@ -254,6 +313,7 @@ export function buildInteractionZoomSuggestions(params: {
  		mergeGapMs = CLICK_CLUSTER_MERGE_GAP_MS,
  		padMs = CLICK_CLUSTER_PAD_MS,
  		spacingMs = padMs,
-+		trailingReserveMs = 0,
-+		leadMs,
++		touchTiming,
  	} = params;
  
  	if (totalMs <= 0) {
-@@ -355,15 +365,22 @@ export function buildInteractionZoomSuggestions(params: {
+@@ -336,6 +396,17 @@ export function buildInteractionZoomSuggestions(params: {
+ 	}
+ 
+ 	const reserved = [...reservedSpans].sort((a, b) => a.start - b.start);
++	if (touchTiming) {
++		const suggestions = scheduleTouchSuggestions(
++			groups,
++			reserved,
++			totalMs,
++			defaultDurationMs,
++			mergeGapMs,
++			touchTiming,
++		);
++		return { status: suggestions.length ? "ok" : "no-slots", suggestions };
++	}
+ 	const suggestions: SuggestedZoomRegion[] = [];
+ 
+ 	const windows = groups
+@@ -355,15 +426,13 @@ export function buildInteractionZoomSuggestions(params: {
  
  	for (const [index, window] of windows.entries()) {
  		const { cluster } = window;
 -		// Expand the shorter side so the focus-defining click lands at the midpoint,
 -		// preserving every click and the full press/drag through its release.
 -		const halfDuration = Math.max(
-+		// Start `leadMs` before the tap and keep the block at least one default
-+		// duration long. An explicit lead is the touch policy; without one the
-+		// desktop (and legacy) behavior stays exactly click-centred.
-+		const hasExplicitLead = Number.isFinite(leadMs);
-+		const lead = Math.max(0, Math.min(leadMs ?? 0, defaultDurationMs / 2));
 +		const symmetricHalf = Math.max(
  			defaultDurationMs / 2,
  			cluster.anchorMs - window.start,
@@ -1097,16 +1190,12 @@ index 41ab1d2..2d506ee 100644
  		);
 -		const centeredStart = cluster.anchorMs - halfDuration;
 -		const centeredEnd = cluster.anchorMs + halfDuration;
-+		const centeredStart = hasExplicitLead
-+			? Math.min(cluster.anchorMs - lead, cluster.firstMs - lead)
-+			: cluster.anchorMs - symmetricHalf;
-+		const centeredEnd = hasExplicitLead
-+			? Math.max(centeredStart + defaultDurationMs, window.end)
-+			: cluster.anchorMs + symmetricHalf;
++		const centeredStart = cluster.anchorMs - symmetricHalf;
++		const centeredEnd = cluster.anchorMs + symmetricHalf;
  		const blockers = [...reserved, ...windows.slice(index + 1)];
  		const canCenter =
  			centeredStart >= window.lower &&
-@@ -386,23 +403,34 @@ export function buildInteractionZoomSuggestions(params: {
+@@ -386,17 +455,12 @@ export function buildInteractionZoomSuggestions(params: {
  				.filter((span) => span.start >= window.end)
  				.map((span) => span.start - spacingMs),
  		);
@@ -1114,9 +1203,7 @@ index 41ab1d2..2d506ee 100644
 -			Math.max(defaultDurationMs, window.end - window.start),
 -			upper - lower,
 -		);
-+		const spanMs = hasExplicitLead
-+			? Math.max(defaultDurationMs, centeredEnd - centeredStart, window.end - window.start)
-+			: Math.max(defaultDurationMs, window.end - window.start);
++		const spanMs = Math.max(defaultDurationMs, window.end - window.start);
 +		const duration = Math.min(spanMs, upper - lower);
  		const minStart = Math.max(lower, window.end - duration);
  		const maxStart = Math.min(window.start, upper - duration);
@@ -1125,48 +1212,29 @@ index 41ab1d2..2d506ee 100644
 -			minStart,
 -			Math.min(cluster.anchorMs - duration / 2, maxStart),
 -		);
-+		const preferredStart = hasExplicitLead
-+			? Math.min(cluster.anchorMs - lead, cluster.firstMs - lead)
-+			: cluster.anchorMs - duration / 2;
-+		const expandedStart = Math.max(minStart, Math.min(preferredStart, maxStart));
++		const expandedStart = Math.max(minStart, Math.min(cluster.anchorMs - duration / 2, maxStart));
  		const regionStart = canCenter ? centeredStart : canExpand ? expandedStart : window.start;
--		const regionEnd = canCenter
-+		let regionEnd = canCenter
+ 		const regionEnd = canCenter
  			? centeredEnd
- 			: canExpand
- 				? expandedStart + duration
- 				: window.end;
-+		// A region ending on the final frame has no room to animate its zoom-out.
-+		// Trim only when the tap still sits comfortably inside the shortened
-+		// region; taps in the last fraction of a second keep their region and
-+		// accept the cut rather than losing the zoom entirely.
-+		if (
-+			trailingReserveMs > 0 &&
-+			cluster.anchorMs <= totalMs - trailingReserveMs - 400 &&
-+			regionEnd > totalMs - trailingReserveMs
-+		) {
-+			regionEnd = Math.max(regionStart + 1, totalMs - trailingReserveMs);
-+		}
- 		if (reserved.some((span) => regionEnd > span.start && regionStart < span.end)) continue;
- 
- 		reserved.push({ start: regionStart, end: regionEnd });
 diff --git a/src/components/video-editor/touchZoomPolicy.test.ts b/src/components/video-editor/touchZoomPolicy.test.ts
 new file mode 100644
-index 0000000..63540c7
+index 0000000..26aa534
 --- /dev/null
 +++ b/src/components/video-editor/touchZoomPolicy.test.ts
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,182 @@
 +import { describe, expect, it } from "vitest";
++import { CURSOR_MOTION_PRESETS } from "./cursorMotionPresets";
 +import { buildInteractionZoomSuggestions } from "./timeline/zoomSuggestionUtils";
-+import type { CursorTelemetryPoint } from "./types";
++import type { ClipRegion, CursorTelemetryPoint } from "./types";
 +import { ZOOM_DEPTH_SCALES } from "./types";
 +import { clampFocusToScale } from "./videoPlayback/focusUtils";
++import { computeRegionStrength, getZoomRegionTiming } from "./videoPlayback/zoomRegionUtils";
 +import {
-+	TOUCH_CLICK_MERGE_GAP_MS,
-+	TOUCH_CLICK_PAD_MS,
 +	TOUCH_TRAILING_RESERVE_MS,
++	TOUCH_WIDE_BEAT_MS,
 +	TOUCH_ZOOM_LEAD_MS,
 +	touchZoomDepth,
++	touchZoomParams,
 +} from "./touchZoomPolicy";
 +
 +const click = (timeMs: number, cx = 0.5, cy = 0.5): CursorTelemetryPoint => ({
@@ -1185,40 +1253,81 @@ index 0000000..63540c7
 +	mouseButton: 1,
 +});
 +
-+function suggestions(samples: CursorTelemetryPoint[], totalMs: number, touch = true) {
++function suggestions(
++	samples: CursorTelemetryPoint[],
++	totalMs: number,
++	touch = true,
++	options: { clipRegions?: ClipRegion[]; reservedSpans?: { start: number; end: number }[] } = {},
++) {
 +	return buildInteractionZoomSuggestions({
 +		cursorTelemetry: samples,
 +		totalMs,
 +		defaultDurationMs: 2000,
-+		...(touch
-+			? {
-+					mergeGapMs: TOUCH_CLICK_MERGE_GAP_MS,
-+					padMs: TOUCH_CLICK_PAD_MS,
-+					trailingReserveMs: TOUCH_TRAILING_RESERVE_MS,
-+					leadMs: TOUCH_ZOOM_LEAD_MS,
-+				}
-+			: {}),
++		...options,
++		...touchZoomParams(touch),
 +	});
 +}
 +
 +describe("touch auto-zoom policy", () => {
-+	it("gives each tap 1.5 s apart its own zoom region", () => {
++	it("shortens holds between taps rather than shifting their leads or overlapping", () => {
 +		const samples = [
 +			click(3000),
 +			release(3080),
-+			click(4500),
-+			release(4580),
-+			click(6000),
-+			release(6080),
++			click(3920, 0.7, 0.7),
++			release(4000, 0.7, 0.7),
++			click(5100, 0.2, 0.4),
++			release(5180, 0.2, 0.4),
 +		];
 +		const result = suggestions(samples, 10_000);
 +		expect(result.suggestions).toHaveLength(3);
 +		for (const [index, region] of result.suggestions.entries()) {
-+			const tap = [3000, 4500, 6000][index];
-+			expect(region.start).toBeLessThanOrEqual(tap);
-+			expect(region.end).toBeGreaterThanOrEqual(tap);
++			const tap = [3000, 3920, 5100][index];
++			expect(region.start).toBe(tap - TOUCH_ZOOM_LEAD_MS);
 +			expect(region.end - region.start).toBeGreaterThanOrEqual(800);
++			const envelope = { startMs: region.start, endMs: region.end, fitTransitions: true as const };
++			const preset = CURSOR_MOTION_PRESETS.focused;
++			const { zoomInEnd, zoomOutStart } = getZoomRegionTiming(envelope, preset);
++			expect(computeRegionStrength(envelope, tap, preset)).toBeGreaterThan(0.35);
++			expect(zoomOutStart).toBeGreaterThanOrEqual(zoomInEnd + 90);
++			expect(computeRegionStrength(envelope, (zoomInEnd + zoomOutStart) / 2, preset)).toBe(1);
++			expect(computeRegionStrength(envelope, region.end, preset)).toBe(0);
++			if (index > 0) {
++				expect(region.start - result.suggestions[index - 1].end).toBeGreaterThanOrEqual(
++					TOUCH_WIDE_BEAT_MS,
++				);
++			}
 +		}
++	});
++
++	it("keeps a quick repeat on one target inside one camera visit", () => {
++		const result = suggestions(
++			[click(3000), release(3080), click(3350), release(3430)],
++			10_000,
++		);
++		expect(result.suggestions).toEqual([{ start: 2800, end: 4800, focus: { cx: 0.5, cy: 0.5 } }]);
++	});
++
++	it("frames neighboring taps without crossing an existing zoom or replacing it", () => {
++		const result = suggestions(
++			[click(3550), release(3630), click(4500), release(4580), click(5130), release(5210)],
++			10_000,
++			true,
++			{ reservedSpans: [{ start: 4080, end: 5000 }] },
++		);
++		expect(result.suggestions.map(({ start, end }) => ({ start, end }))).toEqual([
++			{ start: 3350, end: 4080 },
++			{ start: 5000, end: 7000 },
++		]);
++	});
++
++	it("uses timeline time for sped-up clips and leaves cut-away taps out", () => {
++		const result = suggestions(
++			[click(1000), release(1080), click(4800), release(4880)],
++			5000,
++			true,
++			{ clipRegions: [{ id: "clip", startMs: 1000, endMs: 4000, sourceStartMs: 4000, speed: 2 }] },
++		);
++		expect(result.suggestions).toEqual([{ start: 1200, end: 3200, focus: { cx: 0.5, cy: 0.5 } }]);
 +	});
 +
 +	it("starts a touch region with the tap, not a second before it", () => {
@@ -1267,6 +1376,11 @@ index 0000000..63540c7
 +		expect(result.suggestions[0].end).toBeLessThanOrEqual(10_000 - TOUCH_TRAILING_RESERVE_MS);
 +	});
 +
++	it("leaves a tap too close to the end to the tap indicator alone", () => {
++		const result = suggestions([click(9750), release(9830)], 10_000);
++		expect(result.suggestions).toEqual([]);
++	});
++
 +	it("brings edge taps within reach by choosing a deeper zoom", () => {
 +		expect(touchZoomDepth({ cx: 0.5, cy: 0.5 })).toBe(1);
 +		expect(touchZoomDepth({ cx: 0.5, cy: 0.35 })).toBe(1);
@@ -1292,10 +1406,10 @@ index 0000000..63540c7
 +});
 diff --git a/src/components/video-editor/touchZoomPolicy.ts b/src/components/video-editor/touchZoomPolicy.ts
 new file mode 100644
-index 0000000..10cfd36
+index 0000000..6c546a3
 --- /dev/null
 +++ b/src/components/video-editor/touchZoomPolicy.ts
-@@ -0,0 +1,77 @@
+@@ -0,0 +1,84 @@
 +import { ZOOM_DEPTH_SCALES, type ZoomDepth, type ZoomFocus } from "./types";
 +
 +/**
@@ -1318,9 +1432,10 @@ index 0000000..10cfd36
 + * instead of letting it be cut off by the final frame.
 + */
 +export const TOUCH_CLICK_MERGE_GAP_MS = 800;
-+export const TOUCH_CLICK_PAD_MS = 450;
 +export const TOUCH_TRAILING_RESERVE_MS = 360;
 +export const TOUCH_ZOOM_LEAD_MS = 200;
++export const TOUCH_WIDE_BEAT_MS = 100;
++export const TOUCH_MIN_AFTER_TAP_MS = 320;
 +
 +/**
 + * True inside the Android WebView. `android.js` installs `__recordlyHost`
@@ -1332,18 +1447,24 @@ index 0000000..10cfd36
 +
 +export type TouchZoomParams = {
 +	mergeGapMs?: number;
-+	padMs?: number;
-+	trailingReserveMs?: number;
-+	leadMs?: number;
++	touchTiming?: {
++		leadMs: number;
++		wideBeatMs: number;
++		minAfterTapMs: number;
++		trailingReserveMs: number;
++	};
 +};
 +
-+export function touchZoomParams(): TouchZoomParams {
-+	if (!isTouchHost()) return {};
++export function touchZoomParams(touch = isTouchHost()): TouchZoomParams {
++	if (!touch) return {};
 +	return {
 +		mergeGapMs: TOUCH_CLICK_MERGE_GAP_MS,
-+		padMs: TOUCH_CLICK_PAD_MS,
-+		trailingReserveMs: TOUCH_TRAILING_RESERVE_MS,
-+		leadMs: TOUCH_ZOOM_LEAD_MS,
++		touchTiming: {
++			leadMs: TOUCH_ZOOM_LEAD_MS,
++			wideBeatMs: TOUCH_WIDE_BEAT_MS,
++			minAfterTapMs: TOUCH_MIN_AFTER_TAP_MS,
++			trailingReserveMs: TOUCH_TRAILING_RESERVE_MS,
++		},
 +	};
 +}
 +
@@ -1373,6 +1494,62 @@ index 0000000..10cfd36
 +	}
 +	return 3;
 +}
+diff --git a/src/components/video-editor/types.ts b/src/components/video-editor/types.ts
+index 3087174..39120a6 100644
+--- a/src/components/video-editor/types.ts
++++ b/src/components/video-editor/types.ts
+@@ -16,6 +16,8 @@ export interface ZoomRegion {
+ 	/** Telemetry targets use source coordinates; editor-picked targets use the cropped viewport. */
+ 	focusSpace?: "source" | "viewport";
+ 	mode?: ZoomMode;
++	/** Fit the eased entry, hold, and exit inside short tap-driven blocks. */
++	fitTransitions?: true;
+ }
+ 
+ export interface CursorTelemetryPoint {
+diff --git a/src/components/video-editor/videoPlayback/zoomRegionUtils.ts b/src/components/video-editor/videoPlayback/zoomRegionUtils.ts
+index f56d012..e358c8a 100644
+--- a/src/components/video-editor/videoPlayback/zoomRegionUtils.ts
++++ b/src/components/video-editor/videoPlayback/zoomRegionUtils.ts
+@@ -44,9 +44,11 @@ function positiveDuration(value: number | undefined, fallback: number) {
+ 	return Number.isFinite(value) ? Math.max(1, value!) : fallback;
+ }
+ 
+-/** Transition clocks are independent; short blocks overlap their ramps. */
++type TimedZoomRegion = Pick<ZoomRegion, "startMs" | "endMs" | "fitTransitions">;
++
++/** Desktop keeps independent clocks. Touch visits can fit the same curve into a shorter block. */
+ export function getZoomRegionTiming(
+-	region: Pick<ZoomRegion, "startMs" | "endMs">,
++	region: TimedZoomRegion,
+ 	options: Pick<DominantRegionOptions, "zoomInDurationMs" | "zoomOutDurationMs"> = {},
+ ) {
+ 	const cinematic = isCinematicZoomMotion(options);
+@@ -58,14 +60,21 @@ export function getZoomRegionTiming(
+ 		positiveDuration(options.zoomOutDurationMs, DEFAULT_ZOOM_OUT_DURATION_MS),
+ 		cinematic,
+ 	);
++	const durationMs = Math.max(0, region.endMs - region.startMs);
++	// Leave a few frames at the target instead of multiplying overlapping
++	// ramps, which can nearly cancel each other on successive phone taps.
++	const holdMs = Math.min(100, durationMs * 0.12);
++	const fit = region.fitTransitions
++		? Math.min(1, (durationMs - holdMs) / (zoomInDurationMs + zoomOutDurationMs))
++		: 1;
+ 	return {
+-		zoomInEnd: region.startMs + zoomInDurationMs,
+-		zoomOutStart: region.endMs - zoomOutDurationMs,
++		zoomInEnd: region.startMs + zoomInDurationMs * fit,
++		zoomOutStart: region.endMs - zoomOutDurationMs * fit,
+ 	};
+ }
+ 
+ export function computeRegionStrength(
+-	region: Pick<ZoomRegion, "startMs" | "endMs">,
++	region: TimedZoomRegion,
+ 	timeMs: number,
+ 	options: Pick<DominantRegionOptions, "zoomInDurationMs" | "zoomOutDurationMs"> = {},
+ ) {
 diff --git a/src/hooks/startNativeRecorder.ts b/src/hooks/startNativeRecorder.ts
 index 263f196..1c4c732 100644
 --- a/src/hooks/startNativeRecorder.ts

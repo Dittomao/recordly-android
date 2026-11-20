@@ -52,6 +52,10 @@ treating the API level as the gate.
   than 800 ms apart merge), starting 200 ms before the tap with a depth chosen so
   edge targets are reachable; swipes and notification/SystemUI controls produce
   none, and auto-apply no longer depends on a visible preview canvas.
+- Spaced taps return to the wide frame between visits. Short blocks fit the
+  shared spring to the available time instead of running competing ramps. Touch
+  rings fade in 420 ms and light blur follows fast camera movement. See
+  [Motion parity](../docs/MOTION-PARITY.md) for the Windows measurements.
 - The recording HUD bar fits phone widths: the desktop-width idle bar used to
   overflow to the left and clip the Record button (449 px bar on a 411 px
   viewport, Record at x = -24). The Android host adapter caps the bar and makes
@@ -133,9 +137,9 @@ URLs persist without the loopback token and are re-authorized on load.
 pause/resume/stop path and checks the editor opens it. `node dev/verify-telemetry.mjs`
 enables the accessibility service, records a take while tapping real Settings
 rows, and asserts the sidecar contains normalized click/mouseup pairs.
-`node dev/verify-autozoom.mjs` records three taps and one swipe, then asserts one
-zoom region per tap, a 200 ms lead, an adaptive depth, a bounded rendered focus
-error, and no region for the swipe.
+`node dev/verify-autozoom.mjs` records four Clock keypad taps and one swipe,
+then asserts four fitted zoom regions matching the tap targets, a 200 ms lead,
+adaptive depth, a wide beat between regions, and no region for the swipe.
 `node dev/webview.mjs eval dev/check-codecs.js` reports WebCodecs encoder
 support for the installed WebView.
 

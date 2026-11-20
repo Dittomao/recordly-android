@@ -213,7 +213,7 @@ class NativeBridge(
         "getAppSetting" -> {
             val key = args.optString(0, "")
             if (settings.found(key)) {
-                val value = TouchPresentation.coerceSetting(key, settings.get(key))
+                val value = TouchPresentation.coerceSetting(key, settings.get(key), loading = true)
                 migrateTouchLook(key, value)
             } else if (TouchPresentation.isEditorPreferencesKey(key)) {
                 // Seed touch presentation on first run; otherwise the renderer
@@ -234,7 +234,7 @@ class NativeBridge(
                     "value",
                     (if (found) migrateTouchLook(
                         key,
-                        TouchPresentation.coerceSetting(key, settings.get(key)),
+                        TouchPresentation.coerceSetting(key, settings.get(key), loading = true),
                     ) else null)
                         ?: JSONObject.NULL,
                 )

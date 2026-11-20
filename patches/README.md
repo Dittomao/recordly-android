@@ -9,7 +9,8 @@ The Android build runs the upstream Recordly renderer from
 `recordly-android.patch` contains every renderer change this port needs:
 
 - phone shell: dashboard/editor drawers, compact timeline, touch settings
-- touch auto-zoom policy and adaptive depth
+- touch auto-zoom scheduling, adaptive depth, and fitted spring timing shared
+  by playback and export
 - touch settings surface (no taskbar/updates/shortcuts/account on Android)
 - consent-denial handling and the `canceled` result type
 - the earlier thumbnail-capture fixes

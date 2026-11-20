@@ -22,7 +22,7 @@ import org.json.JSONObject
  *   cursorIdleHide.enabled  false   (see below)
  *   connectZooms            false   (each tap gets its own zoom in/out)
  *   zoomClassicMode         true    (frame the tap, do not follow a cursor)
- *   zoomMotionBlur          0       (crisp text during the zoom)
+ *   zoomMotionBlur          0.20    (subtle shutter blur, only in motion)
  *
  * Idle hide exists to fade an unattended *cursor*. With tap-only telemetry
  * every tap closes an idle interval, so the container opacity is 0 at the
@@ -64,22 +64,30 @@ object TouchPresentation {
 
     private const val TOUCH_EFFECT = "echo"
     private const val TOUCH_COLOR = "#2563EB"
+    private const val TOUCH_ZOOM_BLUR = 0.20
+    private const val MOTION_PREFS_FLAG = "_androidTouchMotionV1"
 
     /**
      * Coerces an `editor` object (a project's `editor` node or a preferences
      * blob). Unknown keys are untouched so upstream fields round-trip.
      */
-    fun applyToEditor(editor: JSONObject) {
+    fun applyToEditor(editor: JSONObject, legacyMotion: Boolean = false) {
         editor.put("showCursor", false)
         editor.put("loopCursor", false)
         editor.put("connectZooms", false)
         editor.put("zoomClassicMode", true)
         // Recordly's default Focused preset: 200 ms in, 200 / 0.7 ms out.
-        // This is the curve the Windows reference uses; the cinematic spring
-        // tails too long for a 2 s block and never settles into the hold.
+        // Its visible curve matches the Windows reference. The shared
+        // compositor samples the spring by timestamp in preview and export.
         editor.put("zoomInDurationMs", 200.0)
         editor.put("zoomOutDurationMs", 285.7142857142857)
-        editor.put("zoomMotionBlur", 0.0)
+        // Older Android builds forced 0 even if the user enabled blur. Upgrade
+        // that old default once, then preserve the user's saved intensity.
+        val blur = editor.optDouble("zoomMotionBlur")
+        editor.put(
+            "zoomMotionBlur",
+            if (!blur.isFinite() || (legacyMotion && blur == 0.0)) TOUCH_ZOOM_BLUR else blur,
+        )
         editor.put("cursorMotionBlur", 0.0)
 
         // Match Recordly's own high-quality export path: FHD is the 1080p-class
@@ -93,9 +101,9 @@ object TouchPresentation {
         editor.put("mp4FrameRate", 60)
         editor.put("cursorClickEffect", TOUCH_EFFECT)
         editor.put("cursorClickEffectColor", TOUCH_COLOR)
-        editor.put("cursorClickEffectScale", 1.4)
+        editor.put("cursorClickEffectScale", 1.2)
         editor.put("cursorClickEffectOpacity", 0.9)
-        editor.put("cursorClickEffectDurationMs", 600)
+        editor.put("cursorClickEffectDurationMs", 420)
 
         val idleHide = editor.optJSONObject("cursorIdleHide") ?: JSONObject()
         idleHide.put("enabled", false)
@@ -107,8 +115,8 @@ object TouchPresentation {
     }
 
     /** Normalises a `.recordly` document in place; a document without `editor` is a no-op. */
-    fun applyToProject(document: JSONObject) {
-        document.optJSONObject("editor")?.let(::applyToEditor)
+    fun applyToProject(document: JSONObject, legacyMotion: Boolean = false) {
+        document.optJSONObject("editor")?.let { applyToEditor(it, legacyMotion) }
     }
 
     /**
@@ -161,9 +169,12 @@ object TouchPresentation {
      * Non-object values (including `null`, which clears a setting) pass through
      * unchanged; only the editor-preferences blob is rewritten.
      */
-    fun coerceSetting(key: String, value: Any?): Any? {
+    fun coerceSetting(key: String, value: Any?, loading: Boolean = false): Any? {
         if (!isEditorPreferencesKey(key) || value !is JSONObject) return value
-        applyToEditor(value)
+        applyToEditor(value, legacyMotion = loading && !value.optBoolean(MOTION_PREFS_FLAG))
+        // Renderer preference snapshots only write known keys; keep the
+        // migration marker here rather than making it part of their contract.
+        value.put(MOTION_PREFS_FLAG, true)
         return value
     }
 

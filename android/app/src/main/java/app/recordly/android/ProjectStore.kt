@@ -198,6 +198,7 @@ class ProjectStore(
         // Saving a project settles its look: if it was migrated on open, the
         // look is now in the body; either way later user edits must win.
         meta.put(LOOK_MIGRATION_FLAG, true)
+        meta.put(MOTION_MIGRATION_FLAG, true)
 
         val thumbnailPath = thumbnailDataUrl?.let { writeThumbnail(id, it) }
 
@@ -292,7 +293,7 @@ class ProjectStore(
         // Existing projects (and imports from desktop) may still ask for a
         // cursor. The loaded document is what the editor applies to its state,
         // so coercion has to happen here, not only on the next save.
-        TouchPresentation.applyToProject(project)
+        TouchPresentation.applyToProject(project, legacyMotion = needsTouchMotionMigration(file))
         applyTouchLookMigration(file, project)
         setCurrentPath(file.path)
         return JSONObject().apply {
@@ -427,7 +428,7 @@ class ProjectStore(
             ?: return JSONObject().put("success", false).put("error", "Could not read the project")
         val project = readBody(file)
             ?: return JSONObject().put("success", false).put("error", "Invalid project file")
-        TouchPresentation.applyToProject(project)
+        TouchPresentation.applyToProject(project, legacyMotion = needsTouchMotionMigration(file))
         applyTouchLookMigration(file, project)
         if (before != revision(file)) {
             return JSONObject().put("success", false).put("error", "Project changed while loading its preview")
@@ -638,6 +639,9 @@ class ProjectStore(
             media.ownedFile(exposed).path
         }
     }
+
+    private fun needsTouchMotionMigration(file: File): Boolean =
+        idOf(file)?.let { !readMeta(it).optBoolean(MOTION_MIGRATION_FLAG) } ?: false
 
     /**
      * Projects saved before the Android floating frame have padding/radius zero.
@@ -921,6 +925,7 @@ class ProjectStore(
             Regex("""^https?://(?:127\.0\.0\.1|localhost)(?::\d+)?(?=[/?#]|$)""")
         const val CURSOR_SIDECAR_SUFFIX = ".cursor.json"
         const val LOOK_MIGRATION_FLAG = "touchFrameMigratedV3"
+        const val MOTION_MIGRATION_FLAG = "touchMotionMigratedV1"
         const val PREVIOUS_LOOK_FLAG = "touchFrameMigratedV2"
         const val PREVIOUS_TOUCH_RADIUS = 3.0
         const val DEFAULT_WALLPAPER_PATH = "/wallpapers/tahoe-light.jpg"

@@ -41,8 +41,10 @@ emulator startup, the verification suite, and evidence regeneration.
   join, with AAC microphone audio and pause/resume.
 - **Touch telemetry**: accessibility click bounds become `CursorTelemetryPoint`
   samples in `<video>.cursor.json`; no cursor is ever drawn.
-- **Auto-zoom**: one zoom per tap, 200 ms lead, adaptive 1.25×/1.5×/1.8× depth,
-  Recordly's 200/285.7 ms Focused spring, 60 fps CFR export.
+- **Auto-zoom**: a 200 ms lead and adaptive 1.25×/1.5×/1.8× depth for spaced
+  taps. Close visits get the same spring shape fitted into shorter blocks with
+  a wide beat between them. The 60 fps CFR export includes a brief touch pulse
+  and light camera-motion blur. See [Motion parity](docs/MOTION-PARITY.md).
 - **Composition**: captured screen inset on a wallpaper at ~86% width with
   rounded corners and shadow, matching the Windows reference.
 - **Storage**: atomic project/metadata writes, byte-channel export into

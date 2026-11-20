@@ -56,7 +56,8 @@ The app must be installed and running. Each verifier brings the task forward.
 
 | Command | Asserts |
 |---|---|
-| `node dev/verify-autozoom.mjs` | 3 taps + 1 swipe → one region per tap, 200 ms lead, expected depth, rendered focus error ≤ 0.25, no swipe region |
+| `node dev/verify-autozoom.mjs` | 4 Clock keypad taps + 1 swipe → matching click targets and four saved, fitted zoom regions, 200 ms lead, adaptive depth, and a wide beat between visits |
+| `node dev/verify-motion-export.mjs` | Exports the open auto-zoom test take through **Publish → Save to device** and uses `ffprobe` to verify 60 fps frame timestamps |
 | `node dev/verify-capture.mjs` | microphone take through notification pause/resume/stop, A/V delta ≤ 250 ms, audio ≥ 115 kbps, editor handoff |
 | `node dev/verify-telemetry.mjs` | real Settings taps reach the sidecar as click/mouseup pairs |
 | `node dev/verify-editor.mjs` | library listing, same-format append, wallpaper byte upload |

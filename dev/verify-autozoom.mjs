@@ -4,7 +4,7 @@
  *   node dev/verify-autozoom.mjs          # assert tap/swipe policy
  *   node dev/verify-autozoom.mjs --report # record and print regions only
  *
- * Records a take while tapping three Settings rows and swiping the list once,
+ * Records a take while tapping four Clock timer keys and swiping the display,
  * then reads the project's generated zoom regions. A tap must produce its own
  * zoom in/out; a swipe must produce none.
  */
@@ -69,8 +69,18 @@ async function tapNode(node) {
 	return { x: Math.round((bounds[0] + bounds[2]) / 2), y: Math.round((bounds[1] + bounds[3]) / 2) };
 }
 
-async function tapText(text) {
-	const nodes = await androidNodes();
+async function dismissAnr(nodes) {
+	const wait = nodes.find((node) => node.text === "Wait");
+	const close = nodes.find((node) => node.text === "Close app");
+	if (!wait || !close) return false;
+	await tapNode(wait);
+	await delay(1_000);
+	return true;
+}
+
+async function tapText(text, snapshot) {
+	let nodes = snapshot ?? await androidNodes();
+	if (await dismissAnr(nodes)) nodes = await androidNodes();
 	const node = nodes.find((candidate) => candidate.text === text || candidate["content-desc"] === text);
 	assert.ok(
 		node,
@@ -79,16 +89,14 @@ async function tapText(text) {
 	return tapNode(node);
 }
 
-async function tapFirst(labels) {
-	for (let attempt = 0; attempt < 12; attempt++) {
-		const nodes = await androidNodes();
-		for (const label of labels) {
-			const node = nodes.find((candidate) => candidate.text === label);
-			if (node) return tapNode(node);
-		}
-		await delay(500);
-	}
-	throw new Error(`No Settings row found among: ${labels.join(", ")}`);
+async function showClock() {
+	const result = await shell([
+		"am",
+		"start",
+		"-n",
+		"com.google.android.deskclock/com.android.deskclock.DeskClock",
+	]);
+	assert.equal(result.code, 0, result.stderr);
 }
 
 async function enableTelemetry() {
@@ -127,44 +135,55 @@ async function waitForLog(pattern, timeout = 20_000) {
 
 async function stopRecording(page) {
 	await shell(["cmd", "statusbar", "collapse"]);
-	await delay(400);
-	await shell(["cmd", "statusbar", "expand-notifications"]);
-	await delay(800);
-	let fromNotification = true;
-	try {
-		await tapText("Stop");
-	} catch {
-		fromNotification = false;
-		await shell(["cmd", "statusbar", "collapse"]);
-		await page.evaluate(() => window.electronAPI.stopNativeScreenRecording());
-	}
-	const log = await waitForLog(/recording written: (.+\.mp4) \(/, 30_000);
+	// The recording backgrounds Recordly. Bring its single task back before
+	// asking Playwright to wait for a stable, visible HUD control.
+	await shell(["am", "start", "-W", "-n", `${packageName}/app.recordly.android.MainActivity`]);
+	// Click the HUD's Stop control. This runs the renderer's full stop
+	// sequence, which sets the new video as current and opens the editor.
+	// Calling stopNativeScreenRecording directly only stops the native
+	// service, so the editor has no new project to load.
+	await page.getByRole("button", { name: "Stop", exact: true }).click({ timeout: 60_000 });
+	const log = await waitForLog(/recording written: (.+\.mp4) \(/, 60_000);
 	const sourcePath = log.match(/recording written: (.+\.mp4) \(/)[1];
 	await shell(["cmd", "statusbar", "collapse"]);
-	if (fromNotification) {
-		try {
-			await page.waitForURL(/windowType=editor/, { timeout: 12_000 });
-		} catch {
-			await page.evaluate(() => window.electronAPI.switchToEditor());
-			await page.waitForURL(/windowType=editor/, { timeout: 20_000 });
-		}
-	} else {
-		await page.evaluate(() => window.electronAPI.switchToEditor());
-		await page.waitForURL(/windowType=editor/, { timeout: 20_000 });
-	}
+	await page.waitForURL(/windowType=editor/, { timeout: 60_000 });
 	return sourcePath;
 }
 
 await enableTelemetry();
-await delay(1_500);
-const pid = (await shell(["pidof", packageName])).stdout.trim().split(/\s+/)[0];
-assert.ok(pid, "Start Recordly on the emulator first");
+// Choose the Timer tab before starting capture. Otherwise the saved Clock tab
+// changes the fixture or introduces a fifth click into tap telemetry.
+await showClock();
+await delay(2_000);
+const clockNodes = await androidNodes();
+if (!clockNodes.some((node) => node.text === "1")) {
+	await tapText("Timers");
+	await delay(1_000);
+}
+await shell(["am", "start", "-n", `${packageName}/app.recordly.android.MainActivity`]);
+await delay(2_000);
+let pid = "";
+for (let attempt = 0; attempt < 20; attempt++) {
+	pid = (await shell(["pidof", packageName])).stdout.trim().split(/\s+/)[0];
+	if (pid) break;
+	await delay(500);
+}
+assert.ok(pid, "Could not start Recordly on the emulator");
 await forward(9222, `localabstract:webview_devtools_remote_${pid}`);
-const browser = await chromium.connectOverCDP("http://127.0.0.1:9222", { timeout: 30_000 });
+let browser;
+for (let attempt = 0; attempt < 5; attempt++) {
+	try {
+		browser = await chromium.connectOverCDP("http://127.0.0.1:9222", { timeout: 30_000 });
+		break;
+	} catch (error) {
+		if (attempt === 4) throw error;
+		await delay(2_000);
+	}
+}
+assert.ok(browser, "Could not connect to the Recordly WebView");
 let completed = false;
 let page = null;
 try {
-	await shell(["am", "start", "-n", `${packageName}/app.recordly.android.MainActivity`]);
 	await delay(1_000);
 	page = browser
 		.contexts()
@@ -182,7 +201,7 @@ try {
 					// navigation can begin before evaluate returns its reply.
 				});
 			try {
-				await page.waitForURL(/windowType=hud-overlay/, { timeout: 8_000 });
+				await page.waitForURL(/windowType=hud-overlay/, { timeout: 20_000 });
 			} catch {
 				// Retry: a stale native surface flag can make the first request a
 				// no-op immediately after a take.
@@ -197,11 +216,12 @@ try {
 	await page.waitForTimeout(500);
 
 	await shell(["logcat", "-c"]);
-	await page.getByRole("button", { name: "Record", exact: true }).click({ timeout: 10_000 });
+	await page.getByRole("button", { name: "Record", exact: true }).click({ timeout: 90_000 });
 	const consentDeadline = Date.now() + 60_000;
 	let sourceSheetOpened = false;
 	while (Date.now() < consentDeadline) {
 		const nodes = await androidNodes();
+		if (await dismissAnr(nodes)) continue;
 		const find = (text) => nodes.find((node) => node.text === text);
 		const tap = async (node) => {
 			if (node) await tapNode(node);
@@ -242,42 +262,44 @@ try {
 	await waitForLog(/capture resumed/);
 	await delay(1_500);
 
-	// Three taps, each on a different Settings row.
+	// Four taps around a swipe on the Clock timer keypad. Clock is far
+	// lighter than system Settings, which ANRs under emulator load.
 	await shell(["cmd", "statusbar", "collapse"]);
-	await shell(["am", "start", "-a", "android.settings.SETTINGS"]);
-	await delay(3_500);
-	// Settings restores its scroll position across launches; start at the top
-	// so the same rows are available on every run.
-	await shell(["input", "swipe", "540", "600", "540", "2000", "400"]);
-	await delay(1_000);
-	const tap1 = await tapFirst(["Network & internet", "Connected devices", "Battery"]);
-	await delay(500);
-	await shell(["input", "keyevent", "KEYCODE_BACK"]);
-	await delay(500);
-	const tap2 = await tapFirst(["Battery", "Display & touch", "Storage"]);
-	await delay(500);
-	await shell(["input", "keyevent", "KEYCODE_BACK"]);
-	await delay(500);
-
-	// A swipe with no tap. It must not produce a zoom region.
-	const swipeStartedAt = Date.now();
-	await shell(["input", "swipe", "540", "1700", "540", "700", "400"]);
+	await showClock();
+	await delay(5_000);
+	const sizeOutput = (await shell(["wm", "size"])).stdout;
+	const screen =
+		sizeOutput.match(/Override size:\s*(\d+)x(\d+)/) ||
+		sizeOutput.match(/Physical size:\s*(\d+)x(\d+)/);
+	const swipeX = screen ? Math.round(Number(screen[1]) / 2) : 540;
+	const screenHeight = screen ? Number(screen[2]) : 2400;
+	// The Timer layout is fixed. Reuse one bounds snapshot: dumping the UI
+	// between each tap adds seconds and never exercises the compact transitions.
+	let keypad = await androidNodes();
+	if (await dismissAnr(keypad)) keypad = await androidNodes();
+	const tap1 = await tapText("1", keypad);
 	await delay(1_200);
-
-	// A fourth tap after the swipe.
-	const tap3 = await tapFirst([
-		"Storage",
-		"Sound & vibration",
-		"Display & touch",
-		"Apps",
-		"Security & privacy",
-		"Location",
-		"Passwords & passkeys",
-		"Safety & emergency",
-	]);
+	const tap2 = await tapText("5", keypad);
 	await delay(500);
-	await shell(["input", "keyevent", "KEYCODE_BACK"]);
-	await delay(700);
+
+	// A swipe with no tap, between the keypad taps. It must not zoom.
+	const swipeStartedAt = Date.now();
+	await shell([
+		"input",
+		"swipe",
+		String(swipeX),
+		String(Math.round(screenHeight * 0.27)),
+		String(swipeX),
+		String(Math.round(screenHeight * 0.14)),
+		"400",
+	]);
+	await delay(1_500);
+
+	const tap3 = await tapText("9", keypad);
+	await delay(1_200);
+	const tap4 = await tapText("0", keypad);
+	await delay(1_200);
+	const taps = [tap1, tap2, tap3, tap4];
 
 	const sourcePath = await stopRecording(page);
 	completed = true;
@@ -288,7 +310,7 @@ try {
 	// so keep polling until the live/newest project actually contains them.
 	let project = null;
 	const sourceName = sourcePath.split("/").pop();
-	for (let attempt = 0; attempt < 25; attempt++) {
+	for (let attempt = 0; attempt < 90; attempt++) {
 		const candidates = [];
 		const current = await page.evaluate(() => window.electronAPI.loadCurrentProjectFile());
 		if (current?.project) candidates.push(current.project);
@@ -348,9 +370,11 @@ try {
 			zoomClassicMode: project.editor?.zoomClassicMode,
 			zoomInDurationMs: project.editor?.zoomInDurationMs,
 			zoomOutDurationMs: project.editor?.zoomOutDurationMs,
+			zoomMotionBlur: project.editor?.zoomMotionBlur,
+			tapPulseDurationMs: project.editor?.cursorClickEffectDurationMs,
 			mergedGapMs: project.editor?.connectedZoomGapMs,
 		},
-		taps: [tap1, tap2, tap3],
+		taps,
 		swipeStartedAt,
 		samples: telemetry.samples?.map((sample) => ({
 			timeMs: sample.timeMs,
@@ -363,6 +387,7 @@ try {
 			endMs: region.endMs,
 			depth: region.depth,
 			focus: region.focus,
+			fitTransitions: region.fitTransitions,
 		})),
 		checks,
 	};
@@ -373,13 +398,20 @@ try {
 		const clicks = (telemetry.samples || []).filter(
 			(sample) => sample.interactionType === "click",
 		);
-		assert.ok(clicks.length >= 3, `expected three taps, got ${clicks.length}`);
+		assert.equal(clicks.length, taps.length, "expected one click per keypad tap and none for the swipe");
 		assert.equal(
 			regions.length,
 			clicks.length,
 			`expected one zoom region per tap; ${clicks.length} taps, ${regions.length} regions`,
 		);
-		for (const click of clicks) {
+		assert.ok(regions.slice(0, -1).some(({ startMs, endMs }) => endMs - startMs < 1800),
+			"the fixture did not exercise a compact zoom before another tap");
+		for (const [index, click] of clicks.entries()) {
+			if (screen) {
+				const expected = taps[index];
+				assert.ok(Math.abs(click.cx - expected.x / Number(screen[1])) < 0.04);
+				assert.ok(Math.abs(click.cy - expected.y / Number(screen[2])) < 0.04);
+			}
 			const region = regions.find(
 				(candidate) => click.timeMs >= candidate.startMs && click.timeMs <= candidate.endMs,
 			);
@@ -387,10 +419,8 @@ try {
 			// Touch has no cursor: the zoom must start with the tap, not the
 			// desktop one-second pre-roll.
 			const leadMs = click.timeMs - region.startMs;
-			assert.ok(
-				leadMs >= 50 && leadMs <= 700,
-				`tap at ${click.timeMs}ms starts zooming ${leadMs}ms early (expected 50-700ms)`,
-			);
+			assert.equal(leadMs, 200, `tap at ${click.timeMs}ms does not have the Android 200 ms lead`);
+			assert.equal(region.fitTransitions, true, "saved auto-zoom must retain fitted transitions");
 			// Depth is chosen so the rendered focus can reach the tap rather
 			// than clamping an edge tap back toward the centre.
 			const expectedDepth = [1, 2, 3].find((depth) => errorAt(click, depth) <= 0.1 + 1e-6) ?? 3;
@@ -409,7 +439,8 @@ try {
 				`tap at (${click.cx}, ${click.cy}) renders ${focusError.toFixed(3)} away from centre at depth ${region.depth}`,
 			);
 		}
-		for (const region of regions) {
+		for (const [index, region] of regions.entries()) {
+			if (index > 0) assert.ok(region.startMs - regions[index - 1].endMs >= 100);
 			assert.ok(
 				region.endMs - region.startMs >= 800,
 				`zoom region ${region.startMs}-${region.endMs} is too short to see in and out`,
