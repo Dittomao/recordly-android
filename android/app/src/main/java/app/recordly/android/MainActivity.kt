@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.graphics.Color
+import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
 import android.os.Build
@@ -213,7 +214,22 @@ class MainActivity : ComponentActivity() {
                 requestPermissions = { permissions -> permissionsLauncher.launch(permissions) },
                 requestProjection = {
                     val manager = getSystemService(MediaProjectionManager::class.java)
-                    projectionLauncher.launch(manager.createScreenCaptureIntent())
+                    // Android 14+ can request the default display directly
+                    // (the same public API a screen recorder uses). The no-arg
+                    // intent opens the "Share one app / Entire screen" chooser;
+                    // its single-app mode is not useful here and the choice
+                    // sheet does not include SystemUI on some devices.
+                    val intent =
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                            runCatching {
+                                manager.createScreenCaptureIntent(
+                                    MediaProjectionConfig.createConfigForDefaultDisplay()
+                                )
+                            }.getOrElse { manager.createScreenCaptureIntent() }
+                        } else {
+                            manager.createScreenCaptureIntent()
+                        }
+                    projectionLauncher.launch(intent)
                 },
                 showHud = { navigateTo(SURFACE_HUD) },
                 showEditor = { navigateTo(SURFACE_EDITOR) },

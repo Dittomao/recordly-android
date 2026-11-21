@@ -93,8 +93,99 @@ all 108 sampled frames of the 21.6 s raw capture had a black status-bar strip.
 The device logged a 1080×2378 mirror at scale 1.0 with no offset, and logged
 applying secure flags to its mirror surface. Black sections around 8.2–9.4 s
 and 20.4 s to the end line up with the system notification shade opening
-mid-take and opening again to stop it. This points to the device's
-third-party screen-share path, not single-app selection, an output crop, or
-the export compositor. The experimental scope change was removed. For a
-take that needs the status bar or shade on this phone, use the built-in
-recorder and import the MP4; it will not have Recordly tap telemetry.
+mid-take and opening again to stop it. This rules out single-app selection
+and an editor crop or export problem for those takes. It does not prove which
+platform policy or recorder interaction caused each blank span, or that other
+Play Store recorders fail. The experimental scope change was removed.
+
+#### Next SystemUI capture check
+
+**Same-phone comparison (2026-11-21):** On Android 16,
+`CPH2707_16.0.5.1301(EX01)`, XRecorder 2.5.7 installed from Google Play
+recorded the real status icons, notification shade, and Quick Settings in its
+original 720×1584 H.264 MP4. It had no near-black top strip or central region
+in 56 frames sampled at 5 fps. Two new Recordly raw MP4s (1080×2378) had a
+near-black top strip in all 76 and 41 sampled frames, with a near-black
+central region in 36 and 20 respectively. The top check uses the top 4.2%
+of the frame; the central check excludes the top and bottom 15%. The
+global Android screen-share-protection override was off when read; no
+privacy settings were changed during analysis. This proves the UI is
+recordable by at least one Play-installed app on this build, not why the
+two recorders differ. The clips used different content and resolutions,
+and the apps target different SDKs (Recordly 35, XRecorder 36).
+
+**Native-only follow-up:** Bypassing the renderer's start flow reproduced the
+failure with the countdown, microphone, and Recordly's own window protection
+all off. The 8.65 s raw H.264 clip had a near-black top strip in all 43 frames
+sampled at 5 fps. Its center turned black in the sampled interval from 4.6 s
+through the video tail (20 frames), after the shade was opened about 4.1 s
+after native start. That take ended before a fresh visible frame confirmed
+recovery after closing the shade. The MP4 and timing report are local only
+(`dev/verification/nord5-recordly-native-only.*`).
+
+**Initial-surface probe:** A temporary debug build passed the encoder surface
+directly to `createVirtualDisplay` rather than attaching it afterward, with
+API target 35 and capture dimensions 1080×2378 unchanged. The 12.70 s
+recording still had a near-black status strip in all 63 frames sampled at
+5 fps and a near-black center in 23 frames, including a 4.0 s span during
+the shade test. Display Settings was visible after dismissal, confirming
+capture could recover when the screen changed. The prior APK was restored
+and verified byte-for-byte. Artifacts are local only
+(`dev/verification/nord5-recordly-initial-surface.*`).
+
+**API 36 probe:** The diagnostic APK differed from the GitHub API 35 build
+only in `targetSdkVersion`; the compiled code, resources, and renderer assets
+matched. With native video-only capture at 1080×2378, the 11.16 s raw MP4 still
+had a near-black top strip in all 56 frames sampled at 5 fps and a near-black
+center in 22, including about 4 s around the shade opening. Raising the target
+to 36 is not a fix on this build. The prior APK was restored and verified
+byte-for-byte; the test did not change project code or Android privacy settings.
+Local artifacts: `dev/verification/nord5-recordly-target36.*`.
+
+**Resolution and source probes:** Matching XRecorder's 720×1584 file
+dimensions did not help: the status strip was near-black in all 64 sampled
+frames, and the center was near-black in 23 frames. A separate full-display
+1080×2378 session read Android's public `ImageReader` surface directly. Its
+top strip had peak RGB 0 in all 21 samples. Its center also had peak RGB 0
+in seven samples during or just after the shade opening, then recovered on
+Display Settings. This probe had no encoder, muxer, or renderer in the pixel
+path, so the blank areas already exist in what Android delivers to Recordly's
+projection. That does not identify the policy or routing difference versus
+XRecorder. No source video or audio was saved by the pixel probe. The prior
+APK was restored byte-for-byte and the fresh main-profile install retained.
+Artifacts: `dev/verification/nord5-recordly-resolution.*` and
+`dev/verification/nord5-recordly-source-pixels.*`.
+
+**Public-API comparison:** The XRecorder 2.5.6.1 APKM (package
+`videoeditor.videorecorder.screenrecorder`, target SDK 36) contains a public
+`MediaProjectionConfig` path. In `classes4.dex`, `lj5.k(MediaProjectionManager)`
+requests `MediaProjectionConfig.createConfigForDefaultDisplay()` and passes it
+to the API-34 `MediaProjectionManager.createScreenCaptureIntent(config)` when a
+flag is not 1; otherwise it falls back to the no-arg intent. `gj5.a()` and
+`hj5.a()` are the small wrappers. This is public API, not a hidden-API or
+privileged path. Recordly previously used only the no-arg user-choice intent.
+It now requests the default display on API 34+ with the no-arg intent as a
+fallback. The static evidence does not prove the installed 2.5.7 build uses the
+same branch at runtime; a controlled Nord 5 take decides whether this changes
+the SystemUI result.
+
+1. Install the new API 34+ build, which requests the default display directly.
+   Confirm the system share prompt (the source chooser may be gone), wait on a
+   neutral screen, open and dismiss the shade mid-take, then stop. Check the
+   original MP4; score the mid-take shade separately from the start/stop
+   transitions. Make a visible screen change after dismissing the shade to test
+   recovery independently of the stop and a static screen's variable frame
+   rate. Keep test content non-sensitive.
+2. Compare Android's active projection metadata and relevant platform logs
+   during a fresh XRecorder and Recordly session on the same phone, to see
+   whether Android is routing the captures differently. Respect protected
+   content. A production fix passes only if
+   Recordly's raw MP4 shows the real status icons and an opening, visible,
+   and dismissing notification panel on-device, with privacy settings and
+   the approved motion unchanged. Lower resolution is a diagnostic, not an
+   accepted shipping trade-off.
+
+For a take that needs SystemUI today, verify the built-in recorder's clip shows
+the desired UI before importing it. It will not have Recordly tap telemetry;
+zooms must be placed manually. Trimming, freezing or cropping does not restore
+SystemUI and is not a capture fix.

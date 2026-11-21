@@ -121,6 +121,22 @@ treating the API level as the gate.
 - Real-device validation of touch telemetry accuracy; model downloads, cloud,
   and auto-updates.
 
+### Google Play submission
+
+- The app currently targets API 35. As of November 2026,
+  [new phone apps must target API 36 or higher](https://support.google.com/googleplay/android-developer/answer/11926878).
+  Recheck the requirement at submission and test capture on a release build.
+- Keep the per-session Android screen-capture consent. Declare the
+  [`mediaProjection` and `microphone` foreground-service use](https://support.google.com/googleplay/android-developer/answer/13392821)
+  in Play Console.
+- Tap-based auto-zoom uses `AccessibilityService`, not an accessibility tool
+  for disability support. If shipped, it needs a
+  [Play declaration, listing disclosure, prominent in-app disclosure and affirmative consent](https://support.google.com/googleplay/android-developer/answer/10964491).
+  Keep recording and manual zoom usable without enabling the service.
+- Play distribution does not grant additional capture privileges. Do not
+  advertise status-bar or notification-shade support until validated on devices
+  with privacy settings unchanged. See the [Nord 5 comparison procedure](../docs/MOTION-PARITY.md#next-systemui-capture-check).
+
 ## Verification
 
 `node --test bridge/bridge.test.mjs bridge/android.test.mjs` runs 9 tests:

@@ -167,15 +167,16 @@ The reference measurements and the verified outputs are in
 
 ## Open work and known limits
 
-- **SystemUI is withheld from third-party capture on the Nord 5.** Raw MP4s
-  have a black status-bar strip, and the picture goes black while the
-  notification shade is open. An explicit full-display MediaProjection request
-  reproduced it; the device logs a full-size mirror with secure flags applied.
-  OnePlus's built-in recorder is a privileged system app
-  (`/product/priv-app/OplusScreenRecorder`). Do not chase a bypass: system
-  privilege, hidden APIs, or an exploit are out of scope. Public workarounds
-  only hide or freeze the blank frames; they do not recover the pixels.
-  Documented in `docs/MOTION-PARITY.md`.
+- **Recordly misses the status bar and notification shade on the tested Nord
+  5 build.** Explicit full-display consent reproduced it in the raw MP4.
+  The Play-installed XRecorder captured both on the same phone, verified in
+  its original MP4. The cause of the difference is still open. Static
+  comparison found XRecorder's public
+  `MediaProjectionConfig.createConfigForDefaultDisplay()` path; Recordly now
+  uses it on API 34+ with the legacy intent as fallback. The decisive Nord 5
+  take is still pending. Follow the
+  [capture investigation](docs/MOTION-PARITY.md#next-systemui-capture-check);
+  preserve system privacy protections and approved motion.
 - Touch focus is the clicked view's centre, not the finger. Non-clickable
   surfaces produce no zoom. Observe-only accessibility is deliberate;
   `setMotionEventSources` would consume input from the recorded app.

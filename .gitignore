@@ -5,6 +5,7 @@ build/
 local.properties
 *.apk
 *.aab
+*.apkm
 *.keystore
 *.jks
 .cxx/
