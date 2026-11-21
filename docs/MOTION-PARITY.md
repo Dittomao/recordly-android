@@ -160,14 +160,16 @@ Artifacts: `dev/verification/nord5-recordly-resolution.*` and
 `videoeditor.videorecorder.screenrecorder`, target SDK 36) contains a public
 `MediaProjectionConfig` path. In `classes4.dex`, `lj5.k(MediaProjectionManager)`
 requests `MediaProjectionConfig.createConfigForDefaultDisplay()` and passes it
-to the API-34 `MediaProjectionManager.createScreenCaptureIntent(config)` when a
-flag is not 1; otherwise it falls back to the no-arg intent. `gj5.a()` and
-`hj5.a()` are the small wrappers. This is public API, not a hidden-API or
-privileged path. Recordly previously used only the no-arg user-choice intent.
-It now requests the default display on API 34+ with the no-arg intent as a
-fallback. The static evidence does not prove the installed 2.5.7 build uses the
-same branch at runtime; a controlled Nord 5 take decides whether this changes
-the SystemUI result.
+to the API-34 `MediaProjectionManager.createScreenCaptureIntent(config)` when
+the config key `AllowRecordSingleAppLocal` is not 1 (its default is 0);
+otherwise it falls back to the no-arg single-app/entire-screen chooser.
+`gj5.a()` and `hj5.a()` are the small wrappers. The default therefore selects
+default-display capture. This is public API, not a hidden-API or privileged
+path. Recordly previously used only the no-arg user-choice intent. It now
+requests the default display on API 34+ with the no-arg intent as a fallback.
+The static evidence does not prove the installed 2.5.7 build uses the same
+branch at runtime; a controlled Nord 5 take decides whether this changes the
+SystemUI result.
 
 1. Install the new API 34+ build, which requests the default display directly.
    Confirm the system share prompt (the source chooser may be gone), wait on a
