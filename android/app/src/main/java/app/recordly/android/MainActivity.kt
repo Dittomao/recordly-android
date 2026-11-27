@@ -190,6 +190,7 @@ class MainActivity : ComponentActivity() {
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
+                if (SileoOverlay.handleBack()) return
                 // Close the current Cut Room overlay before leaving the WebView.
                 webView.evaluateJavascript(
                     "Boolean(window.__recordlyDismissCutRoomOverlay?.())",
@@ -201,6 +202,7 @@ class MainActivity : ComponentActivity() {
         })
 
         attachCaptureHooks()
+        SileoOverlay.attach(this, root)
         DocumentPicker.attach(this) { intent ->
             runOnUiThread {
                 try {
@@ -230,7 +232,7 @@ class MainActivity : ComponentActivity() {
         fileChooserCallback?.onReceiveValue(null)
         fileChooserCallback = null
         CaptureSession.detach()
-        if (isFinishing) SileoOverlay.hide()
+        SileoOverlay.detach(this)
         DocumentPicker.detach(this)
         (webView.parent as? ViewGroup)?.removeView(webView)
         webView.destroy()
@@ -337,11 +339,13 @@ class MainActivity : ComponentActivity() {
                         SileoOverlay.hide()
                         if (isFinishing || isDestroyed) {
                             Log.w(TAG, "recording finished after the activity was destroyed")
+                            CaptureSession.retainRecoverable(file)
                             return@runOnUiThread
                         }
                         val current = bridge
                         if (current == null) {
                             Log.w(TAG, "recording finished without a bridge; leaving it for recovery")
+                            CaptureSession.retainRecoverable(file)
                             return@runOnUiThread
                         }
                         current.adoptRecording(file)

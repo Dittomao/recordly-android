@@ -246,7 +246,25 @@ try {
 			await idle.page.close();
 		}
 
-		console.log("Recorder UI: compact arrival, tap-to-expand, 20 s idle fold, controls, Back, reduced motion and phone containment pass.");
+		// A compact pill dismisses itself after 10 s when never expanded; a
+		// second Home press (`ping`) refreshes that timer without opening it.
+		const compactIdle = await open(browser, 390, 790, "no-preference", "?compactIdleMs=900");
+		try {
+			await arrive(compactIdle.page);
+			await wait(550);
+			assert.equal(await compactIdle.toast.getAttribute("data-exiting"), "false", "Compact idle fired too early");
+			await compactIdle.page.evaluate(() => window.dispatchEvent(new Event("tapswoop-recorder-ping")));
+			await wait(550);
+			assert.equal(await compactIdle.toast.getAttribute("data-expanded"), "false", "Ping must not open the body");
+			assert.equal(await compactIdle.toast.getAttribute("data-exiting"), "false", "Ping must reset the compact idle timer");
+			await compactIdle.page.waitForFunction(() => window.__rec.closed === true, null, { timeout: 3000 });
+			assert.equal(await compactIdle.page.evaluate(() => window.__rec.closed), true, "Compact pill did not auto-dismiss");
+			assert(compactIdle.errors.length === 0, `Compact idle console errors ${compactIdle.errors.join(" | ")}`);
+		} finally {
+			await compactIdle.page.close();
+		}
+
+		console.log("Recorder UI: compact arrival, 10 s unexpanded auto-dismiss, tap-to-expand, 20 s idle fold, controls, Back, reduced motion and phone containment pass.");
 	} finally {
 		await browser.close();
 	}

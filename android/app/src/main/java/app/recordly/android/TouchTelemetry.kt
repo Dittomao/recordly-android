@@ -1,11 +1,15 @@
 package app.recordly.android
 
 import android.accessibilityservice.AccessibilityService
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import android.view.accessibility.AccessibilityWindowInfo
 import org.json.JSONArray
 import org.json.JSONObject
@@ -247,22 +251,59 @@ object TouchTelemetry {
      */
     fun isCollecting(): Boolean = synchronized(lock) { started && !paused }
 
-    /** Only accept a tab that occupies a bounded segment of a full-width bottom bar. */
+    /** Only accept a horizontal navigation/tab item inside a bounded bar strip. */
+    fun isHorizontalNavigationTab(tab: Rect, bar: Rect): Boolean = synchronized(lock) {
+        if (tab.isEmpty || bar.isEmpty) return@synchronized false
+        val maxHeight = (screenHeight / 5).coerceAtLeast(1)
+        val minBarWidth = (screenWidth * 0.42).toInt()
+        bar.width() >= minBarWidth &&
+            bar.height() in tab.height()..maxHeight &&
+            tab.width() in 24..(screenWidth * 0.65).toInt() &&
+            tab.height() in 24..maxHeight &&
+            bar.width() >= (tab.width() * 1.55).toInt() &&
+            tab.top >= bar.top - 12 &&
+            tab.bottom <= bar.bottom + 12
+    }
+
+    /** Backwards-compatible alias kept clear for bottom bar checks. */
     fun isBottomNavigationTab(tab: Rect, bar: Rect): Boolean = synchronized(lock) {
         bar.width() >= screenWidth * 0.8 &&
             bar.top >= screenHeight * 0.75 && bar.bottom >= screenHeight * 0.85 &&
-            bar.height() in 1..(screenHeight / 5) &&
-            tab.top == bar.top && tab.bottom == bar.bottom &&
-            tab.width() in 1..(bar.width() / 2) && bar.contains(tab)
+            isHorizontalNavigationTab(tab, bar)
     }
 
-    /** Limit Home launch recognition to real dock icons, not Recents cards or suggestions. */
+    /**
+     * Reject empty, mostly-offscreen slide-transition boxes, and giant root
+     * containers that would zoom onto `(0.5, 0.5)` instead of a real control.
+     */
+    fun normalizeInteractiveBounds(raw: Rect): Rect? = synchronized(lock) {
+        if (raw.isEmpty || screenWidth <= 1 || screenHeight <= 1) return@synchronized null
+        val clipped = Rect(raw)
+        if (!clipped.intersect(0, 0, screenWidth, screenHeight)) return@synchronized null
+        val rawArea = raw.width().toLong() * raw.height().toLong()
+        val clippedArea = clipped.width().toLong() * clipped.height().toLong()
+        if (rawArea <= 0L || clippedArea * 4L < rawArea) return@synchronized null
+        val oversizedContainer =
+            clipped.width() >= (screenWidth * 0.88).toInt() &&
+                clipped.height() >= (screenHeight * 0.40).toInt()
+        if (oversizedContainer) return@synchronized null
+        clipped
+    }
+
+    /** Accept real launcher app shortcuts/dock icons, never widgets or cards. */
+    fun isLauncherIcon(icon: Rect): Boolean = synchronized(lock) {
+        val clipped = normalizeInteractiveBounds(icon) ?: return@synchronized false
+        clipped.top >= 40 &&
+            clipped.width() in (screenWidth / 12).coerceAtLeast(36)..(screenWidth / 2) &&
+            clipped.height() in (screenHeight / 20).coerceAtLeast(40)..(screenHeight / 4)
+    }
+
+    /** Limit legacy bottom-dock recognition to bounded dock icons. */
     fun isDockIcon(icon: Rect): Boolean = synchronized(lock) {
-        icon.top >= screenHeight * 0.8 &&
-            icon.bottom <= screenHeight &&
-            icon.left >= 0 && icon.right <= screenWidth &&
-            icon.width() in 1..(screenWidth / 3) &&
-            icon.height() in 1..(screenHeight / 5)
+        isLauncherIcon(icon) &&
+            icon.top >= screenHeight * 0.8 &&
+            icon.width() <= screenWidth / 3 &&
+            icon.height() <= screenHeight / 5
     }
 
     /**
@@ -399,8 +440,17 @@ class TelemetryAccessibilityService : AccessibilityService() {
     private val handler = Handler(Looper.getMainLooper())
     private var lastChromeMenuWindowId: Int? = null
     private var homeGeneration = 0
-    private var visibleDockIcons = emptyMap<String, Rect>()
+    private var visibleHomeIcons = emptyMap<String, Rect>()
+    private var homePackageName: String? = null
+    private var homeEnteredAt = 0L
+    private var homeClickSeen = false
     private var dockSplash: DockSplash? = null
+    private var lastWindowPackage: String? = null
+    private var lastActivityClass: String? = null
+    private var lastExternalWindowOpenAt = 0L
+    private var pendingChromePopupStartAt = 0L
+    private var cachedHomePackages: Set<String>? = null
+    private var cachedLaunchLabels: Map<String, String>? = null
 
     private data class DockSplash(val target: String, val atUptime: Long)
 
@@ -418,9 +468,15 @@ class TelemetryAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
+        // Keep display bounds current cleanly across rotation if any.
+        val metrics = resources.displayMetrics
+        TouchTelemetry.setScreenSize(metrics.widthPixels, metrics.heightPixels)
         // Even bounds and control IDs are read only during active capture.
         if (!TouchTelemetry.isCollecting()) {
-            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) clearHome()
+            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                clearHome()
+                pendingChromePopupStartAt = 0L
+            }
             return
         }
         // Our own controls and the system UI are not part of the demo. The
@@ -428,6 +484,7 @@ class TelemetryAccessibilityService : AccessibilityService() {
         // of every take; they are recorded in the video, not as interactions.
         val source = event.packageName?.toString()
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            updateWindowTransitions(event, source)
             handleHomeTransition(event, source)
         }
         if (source != null && (source == packageName || source in SYSTEM_PACKAGES)) return
@@ -439,124 +496,267 @@ class TelemetryAccessibilityService : AccessibilityService() {
 
             AccessibilityEvent.TYPE_VIEW_CLICKED,
             AccessibilityEvent.TYPE_VIEW_LONG_CLICKED,
-            -> TouchTelemetry.onEvent(event) { boundsOf(event) }
-
-            AccessibilityEvent.TYPE_VIEW_SELECTED -> if (source == PLAY_STORE) {
-                playStoreTabBounds(event)?.let { TouchTelemetry.onSemanticActivation(event, it) }
+            -> {
+                if (source != null && source in resolveHomePackages()) {
+                    homeClickSeen = true
+                }
+                TouchTelemetry.onEvent(event) { boundsOf(event) }
             }
 
+            AccessibilityEvent.TYPE_VIEW_SELECTED ->
+                selectedTabBounds(event)?.let { TouchTelemetry.onSemanticActivation(event, it) }
+
             AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> if (source == CHROME) {
-                chromeMenuButtonBounds(event)?.let { TouchTelemetry.onSemanticActivation(event, it) }
+                chromeMenuButtonBounds(event)?.let { (at, rect) ->
+                    TouchTelemetry.onSemanticActivation(at, CHROME, rect)
+                }
             }
         }
     }
 
     private fun clearHome() {
         homeGeneration++
-        visibleDockIcons = emptyMap()
+        visibleHomeIcons = emptyMap()
+        homePackageName = null
+        homeEnteredAt = 0L
+        homeClickSeen = false
         dockSplash = null
     }
 
+    private fun updateWindowTransitions(event: AccessibilityEvent, source: String?) {
+        val cls = event.className?.toString() ?: return
+        if (source == null || source == packageName || source in SYSTEM_PACKAGES) return
+        val looksLikeWindowRoot = '.' in cls &&
+            !cls.startsWith("android.widget.") &&
+            !cls.startsWith("android.view.")
+        if (source != lastWindowPackage || (looksLikeWindowRoot && cls != lastActivityClass)) {
+            lastWindowPackage = source
+            if (looksLikeWindowRoot) lastActivityClass = cls
+            val at = event.eventTime
+            if (at > 0L) lastExternalWindowOpenAt = at
+        }
+    }
+
+    private fun resolveHomePackages(): Set<String> {
+        cachedHomePackages?.let { return it }
+        val resolved = linkedSetOf<String>().apply {
+            addAll(KNOWN_HOME_PACKAGES)
+            val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+            @Suppress("DEPRECATION")
+            val entries = packageManager.queryIntentActivities(intent, 0)
+            for (info in entries) {
+                info.activityInfo?.packageName?.let(::add)
+            }
+        }
+        cachedHomePackages = resolved
+        return resolved
+    }
+
+    private fun resolveLaunchLabels(): Map<String, String> {
+        cachedLaunchLabels?.let { return it }
+        val pm = packageManager
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        @Suppress("DEPRECATION")
+        val entries = pm.queryIntentActivities(intent, 0)
+        val map = HashMap<String, String>()
+        val ambiguous = HashSet<String>()
+        for (info in entries) {
+            val pkg = info.activityInfo?.packageName ?: continue
+            val label = info.loadLabel(pm)?.toString()?.trim()?.takeIf { it.isNotEmpty() } ?: continue
+            val existing = map[label]
+            if (existing != null && existing != pkg) {
+                ambiguous.add(label)
+            } else {
+                map[label] = pkg
+            }
+        }
+        for (label in ambiguous) map.remove(label)
+        cachedLaunchLabels = map
+        return map
+    }
+
+    private fun isHomeActivityClass(source: String?, eventClass: String?): Boolean {
+        if (source == null || eventClass == null) return false
+        if (source !in resolveHomePackages()) return false
+        if (eventClass == OXYGEN_HOME_ACTIVITY || eventClass == PIXEL_HOME_ACTIVITY) return true
+        return (eventClass.endsWith(".Launcher") || eventClass.endsWith("LauncherActivity")) &&
+            !eventClass.contains("Recents", ignoreCase = true)
+    }
+
     /**
-     * This OxygenOS launcher emits no click when opening an app from the dock.
-     * Remember only observed dock positions and consume them when the matching
-     * activity opens directly from Home. Do not assume positions or treat
-     * returning through Recents as another launch.
+     * Launchers such as OxygenOS Home and Android 16 Pixel Launcher sometimes open
+     * an app via gesture/touch hooks without emitting `TYPE_VIEW_CLICKED`. Remember
+     * uniquely labeled Home/dock icon positions while Home is active and consume one
+     * only when the target app opens directly from Home without a normal click.
      */
     private fun handleHomeTransition(event: AccessibilityEvent, source: String?) {
         val eventClass = event.className?.toString()
-        // On this Home, its Google search widget sends a FrameLayout event
-        // before the dock launch. The outgoing Play Store can also send a
-        // Compose pane notification after Home is already visible. Neither is
-        // a foreground activity change; Recents and other windows still clear.
+        // Ignore Home Google Search widget layout noise and outgoing Play Store pane updates.
         if ((source == GOOGLE_SEARCH && eventClass == "android.widget.FrameLayout") ||
             (source == PLAY_STORE && eventClass == "android.view.ViewGroup")
         ) return
-        if (source == OXYGEN_HOME && eventClass == OXYGEN_HOME_ACTIVITY) {
+        if (source != null && isHomeActivityClass(source, eventClass)) {
             clearHome()
             val generation = homeGeneration
             val windowId = event.windowId
-            visibleDockIcons = readDockIcons(windowId)
-            if (visibleDockIcons.isEmpty()) {
-                // Window content can arrive just after its state change.
+            homePackageName = source
+            homeEnteredAt = event.eventTime.takeIf { it > 0L } ?: SystemClock.uptimeMillis()
+            visibleHomeIcons = readHomeIcons(windowId, source)
+            if (visibleHomeIcons.isEmpty()) {
                 handler.postDelayed({
                     if (generation == homeGeneration && TouchTelemetry.isCollecting()) {
-                        visibleDockIcons = readDockIcons(windowId)
+                        visibleHomeIcons = readHomeIcons(windowId, source)
                     }
-                }, 120L)
+                }, 140L)
             }
             return
         }
-        // A cold launch shows an app-owned splash before the real activity.
-        // Save its time, but only count it after that same activity arrives.
-        // A later menu popup does not qualify: Home's cache is consumed once.
-        val splash = dockSplash
-        if (source != null && source in visibleDockIcons &&
-            eventClass == "android.widget.FrameLayout" && event.eventTime > 0 &&
-            (splash == null || splash.target == source)
-        ) {
-            if (splash == null) dockSplash = DockSplash(source, event.eventTime)
+        // Recents / non-home windows or already-clicked launcher launches must not synthesize another tap.
+        if (homePackageName == null || visibleHomeIcons.isEmpty()) return
+        if (homeClickSeen) {
+            clearHome()
             return
         }
-        val matchingActivity =
-            (source == PLAY_STORE && eventClass == PLAY_STORE_ACTIVITY) ||
-            (source == CHROME && eventClass == CHROME_ACTIVITY)
-        val confirmed = matchingActivity && (splash == null ||
-            (splash.target == source && event.eventTime - splash.atUptime in 0L..DOCK_SPLASH_TIMEOUT_MS))
-        val icon = if (confirmed) visibleDockIcons[source] else null
+        val splash = dockSplash
+        val at = event.eventTime.takeIf { it > 0L } ?: SystemClock.uptimeMillis()
+        if (source != null && source in visibleHomeIcons &&
+            eventClass == "android.widget.FrameLayout" &&
+            (splash == null || splash.target == source)
+        ) {
+            if (splash == null) dockSplash = DockSplash(source, at)
+            return
+        }
+        val isSplashMatch = splash != null && splash.target == source &&
+            at - splash.atUptime in 0L..DOCK_SPLASH_TIMEOUT_MS
+        val isDirectLaunch = source != null && source in visibleHomeIcons &&
+            eventClass != "android.widget.FrameLayout"
+        val icon = if (isSplashMatch || isDirectLaunch) visibleHomeIcons[source] else null
+        val launcherPkg = homePackageName
+        val activationAt = if (splash != null && splash.target == source) {
+            (splash.atUptime - 80L).coerceAtLeast(homeEnteredAt)
+        } else {
+            (at - LAUNCH_TRANSITION_DELAY_MS).coerceAtLeast(homeEnteredAt)
+        }
         clearHome()
-        if (icon != null) {
-            TouchTelemetry.onSemanticActivation(splash?.atUptime ?: event.eventTime, OXYGEN_HOME, icon)
+        if (icon != null && launcherPkg != null) {
+            TouchTelemetry.onSemanticActivation(activationAt, launcherPkg, icon)
         }
     }
 
-    private fun readDockIcons(windowId: Int): Map<String, Rect> {
+    private fun readHomeIcons(windowId: Int, homePkg: String): Map<String, Rect> {
         val root = rootInActiveWindow
-            ?.takeIf { it.windowId == windowId && it.packageName?.toString() == OXYGEN_HOME }
+            ?.takeIf { it.windowId == windowId && it.packageName?.toString() == homePkg }
             ?: return emptyMap()
-        return buildMap {
-            for ((target, label) in DOCK_LABELS) {
-                val bounds = root.findAccessibilityNodeInfosByText(label).mapNotNull { node ->
-                    // Only compare known public app labels. Never store labels or content.
-                    if (node.className?.toString() != "android.widget.TextView" ||
-                        !node.isClickable || !node.isVisibleToUser ||
-                        (node.text?.toString() != label && node.contentDescription?.toString() != label)
-                    ) return@mapNotNull null
-                    Rect().also(node::getBoundsInScreen).takeIf(TouchTelemetry::isDockIcon)
-                }.distinct().singleOrNull()
-                if (bounds != null) put(target, bounds)
+        val labels = resolveLaunchLabels()
+        if (labels.isEmpty()) return emptyMap()
+        val matched = HashMap<String, Rect>()
+        val duplicated = HashSet<String>()
+        var visited = 0
+
+        fun visit(node: AccessibilityNodeInfo) {
+            if (visited++ >= 240) return
+            if (node.isClickable && node.isVisibleToUser) {
+                val rect = Rect().also(node::getBoundsInScreen)
+                if (TouchTelemetry.isLauncherIcon(rect)) {
+                    val candidates = sequenceOf(
+                        node.text?.toString()?.trim(),
+                        node.contentDescription?.toString()?.trim()
+                            ?.removePrefix(PIXEL_PREDICTED_PREFIX)?.trim(),
+                    ).filterNotNull().filter { it.isNotEmpty() }
+                    val pkg = candidates.mapNotNull { labels[it] }.firstOrNull()
+                    if (pkg != null && pkg !in duplicated) {
+                        val existing = matched[pkg]
+                        if (existing != null && existing != rect) {
+                            matched.remove(pkg)
+                            duplicated.add(pkg)
+                        } else {
+                            matched[pkg] = rect
+                        }
+                    }
+                }
+            }
+            val count = node.childCount
+            for (i in 0 until count) {
+                val child = node.getChild(i) ?: continue
+                try {
+                    visit(child)
+                } finally {
+                    @Suppress("DEPRECATION")
+                    child.recycle()
+                }
             }
         }
+
+        try {
+            visit(root)
+        } finally {
+            @Suppress("DEPRECATION")
+            root.recycle()
+        }
+        return matched
     }
 
     /**
-     * Play Store's Compose navigation emits selection for the tab, not a click.
-     * Reject selected icons, cards, carousels and any non-navigation selection.
+     * Recognize selected horizontal navigation tabs and segmented bars across apps
+     * (bottom bars, Material `TabLayout`, Compose `NavigationBar`/`TabRow`), while
+     * rejecting initial launch selections, lists, and ViewPager swipes.
      */
-    private fun playStoreTabBounds(event: AccessibilityEvent): Rect? {
-        if (event.className?.toString() != "android.view.View") return null
+    private fun selectedTabBounds(event: AccessibilityEvent): Rect? {
+        val cls = event.className?.toString()
+        if (cls == "androidx.viewpager.widget.ViewPager" || cls == "androidx.viewpager2.widget.ViewPager2") {
+            return null
+        }
+        val at = event.eventTime
+        if (at > 0L && lastExternalWindowOpenAt > 0L &&
+            at - lastExternalWindowOpenAt in 0L until TAB_SETTLE_AFTER_WINDOW_MS
+        ) {
+            return null
+        }
         val node = event.source ?: return null
-        if (!node.isSelected || !node.isVisibleToUser) return null
-        val parent = node.parent ?: return null
-        val tab = Rect().also(node::getBoundsInScreen)
-        val bar = Rect().also(parent::getBoundsInScreen)
-        return tab.takeIf { TouchTelemetry.isBottomNavigationTab(tab, bar) }
+        var p1: AccessibilityNodeInfo? = null
+        var p2: AccessibilityNodeInfo? = null
+        return try {
+            if (!node.isSelected || !node.isVisibleToUser) return null
+            val rawTab = Rect().also(node::getBoundsInScreen)
+            val tab = TouchTelemetry.normalizeInteractiveBounds(rawTab) ?: return null
+            p1 = node.parent ?: return null
+            val bar1 = Rect().also(p1::getBoundsInScreen)
+            if (TouchTelemetry.isHorizontalNavigationTab(tab, bar1)) return tab
+            p2 = p1.parent ?: return null
+            val bar2 = Rect().also(p2::getBoundsInScreen)
+            tab.takeIf { TouchTelemetry.isHorizontalNavigationTab(tab, bar2) }
+        } finally {
+            @Suppress("DEPRECATION")
+            p2?.recycle()
+            @Suppress("DEPRECATION")
+            p1?.recycle()
+            @Suppress("DEPRECATION")
+            node.recycle()
+        }
     }
 
     /**
      * Chrome opens the overflow via a touch listener without emitting a click
-     * for its button. Recognize only the real overflow list in a separate popup
-     * and use the actual toolbar button's bounds. Never use scroll or page changes.
+     * for its button. Track popup opening time so the tap timestamp aligns with
+     * the press rather than waiting until `app_menu_list` finishes laying out.
      */
-    private fun chromeMenuButtonBounds(event: AccessibilityEvent): Rect? {
+    private fun chromeMenuButtonBounds(event: AccessibilityEvent): Pair<Long, Rect>? {
         if (event.className?.toString() != "android.widget.FrameLayout" ||
             event.windowId == lastChromeMenuWindowId
         ) return null
         val applicationWindows = windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
         val popup = applicationWindows.firstOrNull { it.id == event.windowId }?.root ?: return null
-        if (popup.packageName?.toString() != CHROME ||
-            popup.findAccessibilityNodeInfosByViewId("$CHROME:id/app_menu_list").isEmpty()
-        ) return null
+        val popupRect = Rect().also(popup::getBoundsInScreen)
+        val hasMenuList = popup.packageName?.toString() == CHROME &&
+            popup.findAccessibilityNodeInfosByViewId("$CHROME:id/app_menu_list").isNotEmpty()
+        if (!hasMenuList) {
+            val maxW = (resources.displayMetrics.widthPixels * 0.9).toInt()
+            val maxH = resources.displayMetrics.heightPixels / 2
+            if (!popupRect.isEmpty && popupRect.width() < maxW && popupRect.height() in 1 until maxH) {
+                pendingChromePopupStartAt = event.eventTime
+            }
+            return null
+        }
         for (window in applicationWindows) {
             if (window.id == event.windowId) continue
             val root = window.root ?: continue
@@ -565,10 +765,18 @@ class TelemetryAccessibilityService : AccessibilityService() {
             // the correct bounds even if Android reports it as not visible.
             val button = root.findAccessibilityNodeInfosByViewId("$CHROME:id/menu_button")
                 .firstOrNull { it.isClickable } ?: continue
-            val bounds = Rect().also(button::getBoundsInScreen)
-            if (bounds.isEmpty) continue
+            val bounds = TouchTelemetry.normalizeInteractiveBounds(Rect().also(button::getBoundsInScreen))
+                ?: continue
             lastChromeMenuWindowId = event.windowId
-            return bounds
+            val popupStart = pendingChromePopupStartAt
+            pendingChromePopupStartAt = 0L
+            val at = event.eventTime.takeIf { it > 0L } ?: SystemClock.uptimeMillis()
+            val activatedAt = if (popupStart in 1L..at && at - popupStart <= 500L) {
+                popupStart - 60L
+            } else {
+                at - CHROME_MENU_OPEN_DELAY_MS
+            }
+            return activatedAt.coerceAtLeast(1L) to bounds
         }
         return null
     }
@@ -577,7 +785,7 @@ class TelemetryAccessibilityService : AccessibilityService() {
         val node = event.source ?: return null
         return try {
             node.getBoundsInScreen(boundsRect)
-            Rect(boundsRect)
+            TouchTelemetry.normalizeInteractiveBounds(boundsRect)
         } finally {
             @Suppress("DEPRECATION")
             node.recycle()
@@ -590,12 +798,17 @@ class TelemetryAccessibilityService : AccessibilityService() {
         private const val CHROME = "com.android.chrome"
         private const val PLAY_STORE = "com.android.vending"
         private const val OXYGEN_HOME = "com.android.launcher"
+        private const val PIXEL_HOME = "com.google.android.apps.nexuslauncher"
+        private const val AOSP_LAUNCHER = "com.android.launcher3"
         private const val GOOGLE_SEARCH = "com.google.android.googlequicksearchbox"
         private const val OXYGEN_HOME_ACTIVITY = "$OXYGEN_HOME.Launcher"
-        private const val CHROME_ACTIVITY = "org.chromium.chrome.browser.ChromeTabbedActivity"
-        private const val PLAY_STORE_ACTIVITY = "com.google.android.finsky.activities.MainActivity"
+        private const val PIXEL_HOME_ACTIVITY = "$PIXEL_HOME.NexusLauncherActivity"
+        private const val PIXEL_PREDICTED_PREFIX = "Predicted app:"
         private const val DOCK_SPLASH_TIMEOUT_MS = 1500L
-        private val DOCK_LABELS = mapOf(PLAY_STORE to "Play Store", CHROME to "Chrome")
+        private const val LAUNCH_TRANSITION_DELAY_MS = 220L
+        private const val CHROME_MENU_OPEN_DELAY_MS = 220L
+        private const val TAB_SETTLE_AFTER_WINDOW_MS = 250L
+        private val KNOWN_HOME_PACKAGES = setOf(OXYGEN_HOME, PIXEL_HOME, AOSP_LAUNCHER)
 
         /**
          * Windows that are chrome, not the demo: notification shade controls,

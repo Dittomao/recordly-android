@@ -27,7 +27,8 @@ The Android build runs the upstream Recordly renderer from
   microphone and screen-sharing setup with Explore/Start locked until complete,
   no Skip, live state, theme and reduced-motion support, and replay from Settings
 - Android-only app display name, without changing desktop releases
-- touch auto-zoom scheduling, adaptive depth, and fitted spring timing shared
+- touch auto-zoom scheduling, consistent 1.5× framing, crisp 1300 ms / 250 ms
+  lead timing matched to the Windows reference, and fitted spring timing shared
   by playback and export; separate nearby-in-time taps on distinct targets
   when they fit, and use the empty Android Zoom lane for scrubbing
 - touch settings surface (no taskbar/updates/shortcuts/account on Android)

@@ -1081,19 +1081,24 @@ class NativeBridge(
         // the one WebView, chosen by reload.
 
         "showRecordingHud" -> {
-            if (!SileoOverlay.show(appContext, baseUrl())) {
-                SileoOverlay.openPermissionSettings(appContext)
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    android.widget.Toast.makeText(
-                        appContext,
+            when {
+                CaptureSession.isRecording() -> {
+                    toast("Recording is in progress — use Pause or Stop in the notification.")
+                }
+                CaptureSession.phase == CaptureSession.Phase.FINALIZING -> {
+                    toast("Finishing the recording…")
+                }
+                SileoOverlay.isStarting() || CaptureSession.isStarting() -> Unit
+                !SileoOverlay.show(appContext, baseUrl()) -> {
+                    SileoOverlay.openPermissionSettings(appContext)
+                    toast(
                         "Allow TapSwoop to display over other apps to use the floating recorder. " +
                             "Showing the standard recorder for now.",
-                        android.widget.Toast.LENGTH_LONG,
-                    ).show()
+                    )
+                    // Recording must stay possible even when the overlay permission
+                    // is refused or not yet granted.
+                    CaptureSession.showHud()
                 }
-                // Recording must stay possible even when the overlay permission
-                // is refused or not yet granted.
-                CaptureSession.showHud()
             }
             JSONObject().put("success", true)
         }
@@ -2435,16 +2440,19 @@ class NativeBridge(
     private fun hudCaptureProtectionEnabled(): Boolean =
         (settings.get(SettingsStore.PREF_HUD_CAPTURE_PROTECTION) as? Boolean) ?: true
 
+    private fun toast(message: String) {
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            android.widget.Toast.makeText(appContext, message, android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
+
     /** `{...existing, ...patch}`, matching `recordingPreferencesStore.update`. */
     private fun mergePreferences(patch: JSONObject) {
-        val current = settings.get(PREF_RECORDING)
-        val merged = if (current is JSONObject) JSONObject(current.toString()) else JSONObject()
         val keys = patch.keys()
         while (keys.hasNext()) {
             val key = keys.next()
-            merged.put(key, patch.opt(key))
+            settings.mergeRecordingPreference(key, patch.opt(key))
         }
-        settings.set(PREF_RECORDING, merged)
     }
 
     /**
@@ -2472,7 +2480,7 @@ class NativeBridge(
 
     private companion object {
         const val TAG = "NativeBridge"
-        const val PREF_RECORDING = "recordly.recording.preferences"
+        const val PREF_RECORDING = SettingsStore.PREF_RECORDING
         const val PREF_COUNTDOWN_DELAY = "recordly.countdown.delay"
         const val PREF_SHORTCUTS = "recordly.shortcuts"
         const val PREF_APPLICATION = "recordly.application.preferences"

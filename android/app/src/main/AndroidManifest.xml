@@ -22,6 +22,19 @@
          way back that Android 10+ still allows without user interaction. -->
     <uses-permission android:name="android.permission.REORDER_TASKS" />
 
+    <!-- Resolve installed launcher packages and public app icon labels in memory
+         to attribute direct Home launches when the launcher consumes the click. -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.HOME" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="false"
         android:hardwareAccelerated="true"

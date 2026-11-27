@@ -178,6 +178,8 @@ object CaptureSession {
 
     fun isRecording(): Boolean = phase == Phase.RECORDING || phase == Phase.PAUSED
 
+    fun isStarting(): Boolean = synchronized(lock) { pendingStart != null }
+
     // ------------------------------------------------------------------ //
     // Start
     // ------------------------------------------------------------------ //
@@ -457,15 +459,27 @@ object CaptureSession {
         phase = Phase.IDLE
         if (file != null) lastOutput = file
         val result = if (file != null) ok(file) else failure("The recording produced no video")
-        // A take nobody was waiting for is not lost: it stays on disk beside the
-        // other recordings and stays offerable to the interrupted path.
+        // A take nobody was waiting for — or an overlay take whose activity
+        // detached before it could open the editor — stays offerable on launch.
         val adopted = finishStop(result)
-        if (file != null && !adopted) recoverable = file
         val openEditor = openEditorOnStop
         openEditorOnStop = false
+        val finishHook = if (openEditor) hooks?.onRecordingFinished else null
+        if (file != null && ((!adopted && !openEditor) || (openEditor && finishHook == null))) {
+            recoverable = file
+        }
         emit(EVENT_RECORDING_STATE, JSONObject().put("recording", false))
         hooks?.onRecordingStopped?.invoke()
-        if (openEditor && file != null) hooks?.onRecordingFinished?.invoke(file)
+        if (openEditor && file != null) finishHook?.invoke(file)
+    }
+
+    /** Preserves an overlay take for launch recovery if the activity could not open it. */
+    fun retainRecoverable(file: File) {
+        synchronized(lock) {
+            if (phase == Phase.IDLE && recoverable == null) {
+                recoverable = file
+            }
+        }
     }
 
     /**
@@ -520,6 +534,12 @@ object CaptureSession {
      */
     fun onStopFromTray() {
         if (!isRecording()) return
+        if (openEditorOnStop) {
+            // Overlay takes stay on the editor surface (which has no tray-stop
+            // listener), so stop right away instead of waiting out the fallback.
+            stopAsync()
+            return
+        }
         emit(EVENT_STOP_FROM_TRAY, JSONObject())
         scheduleFallbackStop()
     }
@@ -534,6 +554,11 @@ object CaptureSession {
      */
     fun onCaptureInterrupted(message: String) {
         if (!isRecording()) return
+        if (openEditorOnStop) {
+            notifyUser(message)
+            stopAsync()
+            return
+        }
         emit(
             EVENT_RECORDING_INTERRUPTED,
             JSONObject().apply {

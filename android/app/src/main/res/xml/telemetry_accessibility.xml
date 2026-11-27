@@ -9,16 +9,17 @@
     service never calls `setMotionEventSources`, which would take the touch
     stream away from the app being recorded (see PORTING-PLAN §4.3).
 
-  * `typeViewSelected` is used only for Play Store's bottom navigation tabs.
+  * `typeViewSelected` detects selected horizontal navigation tabs, segmented
+    controls, and tab bars across apps (filtering out scroll/pager noise).
     `typeWindowStateChanged` confirms Chrome's overflow popup or a direct
-    launch from a known dock icon.
-    Other selections, window changes, focus changes and scrolls are not taps.
+    launch from a known Home/dock app icon when the launcher consumes its click.
+    Focus changes, content floods, and scrolls are ignored.
 
   * `canRetrieveWindowContent="true"` is required to read `event.source`, and
     `getBoundsInScreen` is the only way to turn a clicked *view* into a
     normalized point. During active capture, the recorder reads bounds and
-    checks the control's role/state or known public dock labels. It never
-    records those labels.
+    checks the control's role/state or matches installed launcher icon bounds.
+    It never records labels or user text.
 
   * Window access and resource IDs identify the Chrome popup and the specific
     toolbar button behind it. No raw touch input is intercepted.

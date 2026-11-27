@@ -77,10 +77,10 @@ index 99155dc..e2ee930 100644
  					<details className="mt-4 text-xs text-muted-foreground">
 diff --git a/src/components/launch/RecorderSetup.css b/src/components/launch/RecorderSetup.css
 new file mode 100644
-index 0000000..0f2b9a5
+index 0000000..a51955c
 --- /dev/null
 +++ b/src/components/launch/RecorderSetup.css
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,202 @@
 +@font-face {
 +	font-family: "DM Sans";
 +	src: url("../../assets/fonts/dm-sans/DMSans-Variable.ttf") format("truetype");
@@ -173,26 +173,40 @@ index 0000000..0f2b9a5
 +.recorder-stage[data-booted] [data-sileo-toast] {
 +	opacity: 1 !important;
 +	transform: none !important;
++	transform-origin: center top;
 +	transition: none !important;
 +	pointer-events: auto;
 +	touch-action: manipulation;
 +}
 +.recorder-stage [data-sileo-toast][data-exiting="true"] {
 +	opacity: 0 !important;
++	transform: translateY(-7px) scale(.9) !important;
 +	pointer-events: none;
-+	transition: opacity 120ms ease !important;
++	transition:
++		opacity 240ms cubic-bezier(0.22, 1, 0.36, 1),
++		transform 240ms cubic-bezier(0.22, 1, 0.36, 1) !important;
 +}
 +/* Sileo hides unopened content with content-visibility, which makes its height
 +   unmeasurable before the first expand. Keep the content in layout (opacity 0,
-+   inert) so the spring targets the real body height instead of jumping. */
-+.recorder-stage [data-sileo-content] { content-visibility: visible !important; }
++   inert) and clip it to the animated body height so controls never float over
++   the app before the dark surface arrives behind them. */
++.recorder-stage [data-sileo-content] {
++	content-visibility: visible !important;
++	overflow: hidden;
++	border-radius: 0 0 16px 16px;
++}
++.recorder-stage [data-sileo-description] { content-visibility: visible !important; }
 +/* Sileo fades the body fill in while it grows. On a floating overlay that
 +   lets the bright app underneath show through the card (red Record, Import,
 +   title), which reads as the card/word wobbling. The body must be opaque for
 +   every pixel of the expansion; only its height animates. */
 +.recorder-stage [data-sileo-body] { opacity: 1 !important; }
 +/* A toast can fade its body in after the shape lands; a recorder cannot show an
-+   empty black card while the controls arrive. Upstream still fades the body. */
++   empty black card while the controls arrive, nor vanish them abruptly before
++   the card finishes closing. */
++.recorder-stage [data-sileo-toast][data-ready="true"] [data-sileo-content] {
++	transition: opacity 200ms ease 0ms !important;
++}
 +.recorder-stage [data-sileo-toast][data-ready="true"] [data-sileo-content][data-visible="true"] {
 +	transition: opacity 160ms ease 30ms !important;
 +}
@@ -202,6 +216,7 @@ index 0000000..0f2b9a5
 +	   36px control. Keep the pill at its full 40px for touch. The body and
 +	   the gooey silhouette still move on the upstream spring. */
 +	transform: none !important;
++	transition-timing-function: cubic-bezier(0.22, 1, 0.36, 1) !important;
 +}
 +.recorder-stage [data-sileo-header-stack] {
 +	/* The Sileo header is 40px with 8px padding. Extend the actual button
@@ -264,15 +279,16 @@ index 0000000..0f2b9a5
 +		animation-duration: .01ms !important;
 +		animation-iteration-count: 1 !important;
 +	}
++	.recorder-stage [data-sileo-toast][data-exiting="true"] { transform: none !important; }
 +	#boot { animation-duration: .01ms; animation-iteration-count: 1; }
 +	.recorder-mic:active { transform: none; }
 +}
 diff --git a/src/components/launch/RecorderSetup.tsx b/src/components/launch/RecorderSetup.tsx
 new file mode 100644
-index 0000000..eedf845
+index 0000000..d6f5551
 --- /dev/null
 +++ b/src/components/launch/RecorderSetup.tsx
-@@ -0,0 +1,245 @@
+@@ -0,0 +1,270 @@
 +import { useEffect, useLayoutEffect, useRef, useState } from "react";
 +import { createRoot } from "react-dom/client";
 +import { useReducedMotion } from "motion/react";
@@ -282,7 +298,10 @@ index 0000000..eedf845
 +
 +interface RecorderNative {
 +	ready(): void;
++	prepare?(expandedHeight: number): void;
 +	resize(height: number, pillWidth: number, expanded: boolean): void;
++	microphone?(): boolean;
++	setMicrophone?(enabled: boolean): void;
 +	start(microphone: boolean): void;
 +	close(): void;
 +}
@@ -294,11 +313,12 @@ index 0000000..eedf845
 +}
 +
 +const DEFAULT_IDLE_MS = 20_000;
++const DEFAULT_COMPACT_IDLE_MS = 10_000;
 +
-+/** The 20 s fold is production behaviour; `?idleMs=` lets the UI verifier run it fast. */
-+function idleTimeout(): number {
-+	const value = Number(new URLSearchParams(window.location.search).get("idleMs"));
-+	return Number.isFinite(value) && value >= 500 ? value : DEFAULT_IDLE_MS;
++/** The 20 s fold and 10 s compact dismiss are production behaviour; query overrides let the UI verifier run fast. */
++function queryMs(name: string, fallback: number): number {
++	const value = Number(new URLSearchParams(window.location.search).get(name));
++	return Number.isFinite(value) && value >= 400 ? value : fallback;
 +}
 +
 +function MicIcon({ on }: { on: boolean }) {
@@ -312,32 +332,21 @@ index 0000000..eedf845
 +function RecorderSetup() {
 +	const [expanded, setExpanded] = useState(false);
 +	const [phase, setPhase] = useState<"arriving" | "setup" | "starting" | "closing">("arriving");
-+	const [micOn, setMicOn] = useState(true);
++	const [micOn, setMicOn] = useState(() => window.TapswoopRecorder?.microphone?.() ?? true);
 +	const [width, setWidth] = useState(() => Math.min(350, window.innerWidth - 24));
 +	const [error, setError] = useState("");
 +	const [activity, setActivity] = useState(0);
 +	const reducedMotion = useReducedMotion();
-+	const idleMs = useRef(idleTimeout()).current;
++	const idleMs = useRef(queryMs("idleMs", DEFAULT_IDLE_MS)).current;
++	const compactIdleMs = useRef(queryMs("compactIdleMs", DEFAULT_COMPACT_IDLE_MS)).current;
 +	const stage = useRef<HTMLDivElement>(null);
 +	const actionTimer = useRef<number | undefined>(undefined);
++	const closingExpandedRef = useRef(false);
 +	const busy = phase === "starting" || phase === "closing";
-+
-+	const pillWidth = () => {
-+		const toast = document.querySelector<HTMLElement>("[data-sileo-toast]");
-+		return Number.parseFloat(toast?.style.getPropertyValue("--_pw") ?? "") || 190;
-+	};
 +
 +	const openSetup = () => {
 +		if (expanded || busy || phase === "arriving") return;
-+		const native = window.TapswoopRecorder;
-+		if (!native) {
-+			setExpanded(true);
-+			return;
-+		}
-+		// Widen only: if a previous fold has not settled yet, forcing the
-+		// height back to compact would bounce the surface on a rapid re-open.
-+		native.resize(0, pillWidth(), true);
-+		requestAnimationFrame(() => requestAnimationFrame(() => setExpanded(true)));
++		setExpanded(true);
 +	};
 +
 +	const noteActivity = () => setActivity((value) => value + 1);
@@ -349,16 +358,30 @@ index 0000000..eedf845
 +			setPhase("setup");
 +			setExpanded(false);
 +		};
++		const open = () => {
++			setExpanded((was) => (was || busy || phase === "arriving" ? was : true));
++		};
 +		const outside = () => setExpanded(false);
-+		const back = () => { if (!busy) { setPhase("closing"); setExpanded(false); } };
++		const ping = () => { if (!busy && !expanded) noteActivity(); };
++		const back = () => {
++			if (!busy) {
++				closingExpandedRef.current = expanded;
++				setPhase("closing");
++				setExpanded(false);
++			}
++		};
 +		const resize = () => setWidth(Math.min(350, window.innerWidth - 24));
 +		window.addEventListener("tapswoop-recorder-arrived", arrive);
++		window.addEventListener("tapswoop-recorder-open", open);
 +		window.addEventListener("tapswoop-recorder-outside", outside);
++		window.addEventListener("tapswoop-recorder-ping", ping);
 +		window.addEventListener("tapswoop-recorder-back", back);
 +		window.addEventListener("resize", resize);
 +		return () => {
 +			window.removeEventListener("tapswoop-recorder-arrived", arrive);
++			window.removeEventListener("tapswoop-recorder-open", open);
 +			window.removeEventListener("tapswoop-recorder-outside", outside);
++			window.removeEventListener("tapswoop-recorder-ping", ping);
 +			window.removeEventListener("tapswoop-recorder-back", back);
 +			window.removeEventListener("resize", resize);
 +		};
@@ -374,7 +397,9 @@ index 0000000..eedf845
 +					if (cancelled) return;
 +					const boot = document.getElementById("boot");
 +					const native = window.TapswoopRecorder;
++					const description = stage.current?.querySelector<HTMLElement>("[data-sileo-description]");
 +					if (native) {
++						if (description) native.prepare?.(description.scrollHeight + 76);
 +						native.ready();
 +					} else {
 +						setPhase("setup");
@@ -431,16 +456,24 @@ index 0000000..eedf845
 +		return () => { window.clearTimeout(timer); observer.disconnect(); };
 +	}, [expanded, width, error, reducedMotion]);
 +
-+	// A Dynamic Island folds itself when the user stops interacting. The pill
-+	// stays; a new tap opens it again.
++	// A Dynamic Island folds itself after 20 s without expanded interaction, and
++	// dismisses itself cleanly after 10 s if the compact pill is never opened.
 +	useEffect(() => {
-+		if (!expanded || phase !== "setup") return;
-+		const timer = window.setTimeout(() => setExpanded(false), idleMs);
++		if (phase !== "setup") return;
++		if (expanded) {
++			const timer = window.setTimeout(() => setExpanded(false), idleMs);
++			return () => window.clearTimeout(timer);
++		}
++		const timer = window.setTimeout(() => {
++			closingExpandedRef.current = false;
++			setPhase("closing");
++		}, compactIdleMs);
 +		return () => window.clearTimeout(timer);
-+	}, [expanded, phase, activity, idleMs]);
++	}, [expanded, phase, activity, idleMs, compactIdleMs]);
 +
 +	useEffect(() => {
 +		if (phase !== "starting" && phase !== "closing") return;
++		const delay = reducedMotion ? 80 : (phase === "closing" && !closingExpandedRef.current ? 280 : 680);
 +		actionTimer.current = window.setTimeout(() => {
 +			if (phase === "closing") window.TapswoopRecorder?.close();
 +			else if (window.TapswoopRecorder) window.TapswoopRecorder.start(micOn);
@@ -449,17 +482,21 @@ index 0000000..eedf845
 +				setPhase("setup");
 +				setExpanded(true);
 +			}
-+		}, reducedMotion ? 80 : 680);
++		}, delay);
 +		return () => window.clearTimeout(actionTimer.current);
 +	}, [phase, micOn, reducedMotion]);
 +
 +	useEffect(() => {
 +		const keydown = (event: KeyboardEvent) => {
-+			if (event.key === "Escape" && !busy) { setPhase("closing"); setExpanded(false); }
++			if (event.key === "Escape" && !busy) {
++				closingExpandedRef.current = expanded;
++				setPhase("closing");
++				setExpanded(false);
++			}
 +		};
 +		window.addEventListener("keydown", keydown);
 +		return () => window.removeEventListener("keydown", keydown);
-+	}, [busy]);
++	}, [busy, expanded]);
 +
 +	return (
 +		<div ref={stage} className="recorder-stage" data-phase={phase}
@@ -486,7 +523,11 @@ index 0000000..eedf845
 +					<div className="recorder-controls">
 +						<div className="recorder-options">
 +							<button className="recorder-mic" type="button" aria-pressed={micOn}
-+								aria-label="Microphone" disabled={busy} onClick={() => setMicOn(!micOn)}>
++								aria-label="Microphone" disabled={busy} onClick={() => {
++									const next = !micOn;
++									setMicOn(next);
++									window.TapswoopRecorder?.setMicrophone?.(next);
++								}}>
 +								<MicIcon on={micOn} />
 +								<span>Mic <span className="recorder-option-state">{micOn ? "on" : "off"}</span></span>
 +								<span className="recorder-switch" aria-hidden="true"><span /></span>
@@ -505,7 +546,7 @@ index 0000000..eedf845
 +								setPhase("starting");
 +							}} />
 +							<button type="button" className="recorder-close" disabled={busy}
-+								onClick={() => { setExpanded(false); setPhase("closing"); }}>Cancel</button>
++								onClick={() => { closingExpandedRef.current = expanded; setExpanded(false); setPhase("closing"); }}>Cancel</button>
 +						</div>
 +						<p className="recorder-note" role={error ? "alert" : undefined}>
 +							{error || "Android will ask to share your screen."}
@@ -547,10 +588,10 @@ index 0000000..5d25ec3
 +SOFTWARE.
 diff --git a/src/components/launch/sileo/README.md b/src/components/launch/sileo/README.md
 new file mode 100644
-index 0000000..3a3b6fc
+index 0000000..b0129cf
 --- /dev/null
 +++ b/src/components/launch/sileo/README.md
-@@ -0,0 +1,24 @@
+@@ -0,0 +1,27 @@
 +# Sileo recorder surface
 +
 +Vendored from **hiaaryan/sileo 0.1.6**, MIT, commit
@@ -563,11 +604,14 @@ index 0000000..3a3b6fc
 +
 +Local changes to `sileo.tsx`: controlled expansion for touch; responsive width;
 +a `bounce` prop (the recorder uses 0 so the body expands once without
-+overshooting); `useReducedMotion` for SVG targets; a group root and an actual
-+header button so interactive recorder controls are not nested in a button;
-+hidden content is inert. Toast-only hover/swipe/refresh code remains upstream
-+but is not attached to the recorder root. `styles.css`, constants, icons and
-+types are unchanged.
++overshooting); pre-measured expanded SVG height; toast container height,
++horizontal body footprint (`x`/`width`), and clipped bottom content container
++(`height`/`clipPath`) locked to the same body spring so expand and minimize are
++symmetric without clipping or horizontal bar overhang; `useReducedMotion` for SVG
++targets; a group root and an actual header button so interactive recorder
++controls are not nested in a button; hidden content is inert. Toast-only
++hover/swipe/refresh code remains upstream but is not attached to the recorder
++root. `styles.css`, constants, icons and types are unchanged.
 +Application-specific styling is in `../RecorderSetup.css`.
 +
 +The separate `recorder.html` entry loads only React, Motion, this surface and
@@ -686,10 +730,10 @@ index 0000000..0ea23b0
 +);
 diff --git a/src/components/launch/sileo/sileo.tsx b/src/components/launch/sileo/sileo.tsx
 new file mode 100644
-index 0000000..bdf1b23
+index 0000000..3e34abd
 --- /dev/null
 +++ b/src/components/launch/sileo/sileo.tsx
-@@ -0,0 +1,680 @@
+@@ -0,0 +1,712 @@
 +import { motion, useReducedMotion } from "motion/react";
 +import {
 +  type CSSProperties,
@@ -1076,7 +1120,7 @@ index 0000000..bdf1b23
 +  const rawExpanded = hasDesc ? Math.max(minExpanded, HEIGHT + contentHeight) : minExpanded;
 +
 +  const frozenExpandedRef = useRef(rawExpanded);
-+  if (open) {
++  if (open || rawExpanded > frozenExpandedRef.current) {
 +    frozenExpandedRef.current = rawExpanded;
 +  }
 +
@@ -1104,18 +1148,40 @@ index 0000000..bdf1b23
 +    [pillX, resolvedPillWidth, open, pillHeight],
 +  );
 +
++  const toastAnimate = useMemo(
++    () => ({ height: open ? expanded : HEIGHT }),
++    [open, expanded],
++  );
++
 +  const bodyAnimate = useMemo(
 +    () => ({
++      x: open ? 0 : pillX,
++      width: open ? width : resolvedPillWidth,
 +      height: open ? expandedContent : 0,
 +      opacity: open ? 1 : 0,
 +    }),
-+    [open, expandedContent],
++    [open, pillX, width, resolvedPillWidth, expandedContent],
++  );
++
++  const contentAnimate = useMemo(
++    () => ({
++      height: open ? expandedContent : 0,
++      clipPath: open
++        ? `inset(0px 0px 0px 0px round ${resolvedRoundness}px)`
++        : `inset(0px ${Math.max(0, pillX)}px 0px ${Math.max(0, pillX)}px round ${resolvedRoundness}px)`,
++    }),
++    [open, expandedContent, pillX, resolvedRoundness],
 +  );
 +
 +  const spring = useMemo(() => ({ ...SPRING, bounce }), [bounce]);
 +  const bodyTransition = useMemo(
 +    () => reducedMotion ? { duration: 0 } : (open ? spring : { ...spring, bounce: 0 }),
 +    [open, reducedMotion, spring],
++  );
++
++  const toastTransition = useMemo(
++    () => (ready ? bodyTransition : { duration: 0 }),
++    [ready, bodyTransition],
 +  );
 +
 +  const pillTransition = useMemo(
@@ -1242,7 +1308,7 @@ index 0000000..bdf1b23
 +  /* --------------------------------- Render --------------------------------- */
 +
 +  return (
-+    <div
++    <motion.div
 +      ref={buttonRef}
 +      data-sileo-toast
 +      data-ready={ready}
@@ -1253,6 +1319,9 @@ index 0000000..bdf1b23
 +      data-state={view.state}
 +      className={className}
 +      style={rootStyle}
++      initial={false}
++      animate={expand === "bottom" ? toastAnimate : undefined}
++      transition={expand === "bottom" ? toastTransition : undefined}
 +      role="group"
 +      aria-label={view.title}
 +      onMouseEnter={handleEnter}
@@ -1277,7 +1346,6 @@ index 0000000..bdf1b23
 +            <motion.rect
 +              data-sileo-body
 +              y={HEIGHT}
-+              width={width}
 +              rx={resolvedRoundness}
 +              ry={resolvedRoundness}
 +              fill={view.fill}
@@ -1348,7 +1416,15 @@ index 0000000..bdf1b23
 +      </div>
 +
 +      {hasDesc && (
-+        <div data-sileo-content data-edge={expand} data-visible={open} inert={!open}>
++        <motion.div
++          data-sileo-content
++          data-edge={expand}
++          data-visible={open}
++          inert={!open}
++          initial={false}
++          animate={expand === "bottom" ? contentAnimate : undefined}
++          transition={expand === "bottom" ? bodyTransition : undefined}
++        >
 +          <div ref={contentRef} data-sileo-description className={view.styles?.description}>
 +            {view.description}
 +            {view.button && (
@@ -1365,9 +1441,9 @@ index 0000000..bdf1b23
 +              </a>
 +            )}
 +          </div>
-+        </div>
++        </motion.div>
 +      )}
-+    </div>
++    </motion.div>
 +  );
 +});
 diff --git a/src/components/launch/sileo/styles.css b/src/components/launch/sileo/styles.css
@@ -8705,7 +8781,7 @@ index 344d35b..66f9096 100644
  function normalizeRowCount(rowCount: number) {
  	if (!Number.isFinite(rowCount)) {
 diff --git a/src/components/video-editor/timeline/zoomSuggestionUtils.ts b/src/components/video-editor/timeline/zoomSuggestionUtils.ts
-index 41ab1d2..0989119 100644
+index 41ab1d2..2cde8a6 100644
 --- a/src/components/video-editor/timeline/zoomSuggestionUtils.ts
 +++ b/src/components/video-editor/timeline/zoomSuggestionUtils.ts
 @@ -5,6 +5,7 @@ import {
@@ -8716,7 +8792,7 @@ index 41ab1d2..0989119 100644
  import { getCursorPressIntervals } from "../videoPlayback/cursorPress";
  import { detectInteractionCandidates } from "./cursorInteractionCandidates";
  
-@@ -234,6 +235,75 @@ function buildClickClusters(
+@@ -234,6 +235,76 @@ function buildClickClusters(
  	return clusters;
  }
  
@@ -8771,9 +8847,10 @@ index 41ab1d2..0989119 100644
 +						? end - timing.trailingReserveMs
 +						: slotEnd;
 +				if (latestEnd < earliestEnd) continue;
++				const blockDurationMs = Math.min(timing.defaultDurationMs ?? defaultDurationMs, totalMs);
 +				const regionEnd = Math.min(
 +					latestEnd,
-+					Math.max(regionStart + defaultDurationMs, earliestEnd),
++					Math.max(regionStart + blockDurationMs, earliestEnd),
 +				);
 +				suggestions.push({ start: regionStart, end: regionEnd, focus: cluster.focus });
 +			}
@@ -8792,7 +8869,7 @@ index 41ab1d2..0989119 100644
  export function buildInteractionZoomSuggestions(params: {
  	cursorTelemetry: CursorTelemetryPoint[];
  	/** Telemetry uses recording time; zoom blocks use the edited timeline. */
-@@ -244,6 +314,7 @@ export function buildInteractionZoomSuggestions(params: {
+@@ -244,6 +315,7 @@ export function buildInteractionZoomSuggestions(params: {
  	spacingMs?: number;
  	mergeGapMs?: number;
  	padMs?: number;
@@ -8800,7 +8877,7 @@ index 41ab1d2..0989119 100644
  }): InteractionZoomSuggestionResult {
  	const {
  		cursorTelemetry,
-@@ -254,6 +325,7 @@ export function buildInteractionZoomSuggestions(params: {
+@@ -254,6 +326,7 @@ export function buildInteractionZoomSuggestions(params: {
  		mergeGapMs = CLICK_CLUSTER_MERGE_GAP_MS,
  		padMs = CLICK_CLUSTER_PAD_MS,
  		spacingMs = padMs,
@@ -8808,7 +8885,7 @@ index 41ab1d2..0989119 100644
  	} = params;
  
  	if (totalMs <= 0) {
-@@ -336,6 +408,17 @@ export function buildInteractionZoomSuggestions(params: {
+@@ -336,6 +409,17 @@ export function buildInteractionZoomSuggestions(params: {
  	}
  
  	const reserved = [...reservedSpans].sort((a, b) => a.start - b.start);
@@ -8826,7 +8903,7 @@ index 41ab1d2..0989119 100644
  	const suggestions: SuggestedZoomRegion[] = [];
  
  	const windows = groups
-@@ -355,15 +438,13 @@ export function buildInteractionZoomSuggestions(params: {
+@@ -355,15 +439,13 @@ export function buildInteractionZoomSuggestions(params: {
  
  	for (const [index, window] of windows.entries()) {
  		const { cluster } = window;
@@ -8845,7 +8922,7 @@ index 41ab1d2..0989119 100644
  		const blockers = [...reserved, ...windows.slice(index + 1)];
  		const canCenter =
  			centeredStart >= window.lower &&
-@@ -386,17 +467,12 @@ export function buildInteractionZoomSuggestions(params: {
+@@ -386,17 +468,12 @@ export function buildInteractionZoomSuggestions(params: {
  				.filter((span) => span.start >= window.end)
  				.map((span) => span.start - spacingMs),
  		);
@@ -8868,10 +8945,10 @@ index 41ab1d2..0989119 100644
  			? centeredEnd
 diff --git a/src/components/video-editor/touchZoomPolicy.test.ts b/src/components/video-editor/touchZoomPolicy.test.ts
 new file mode 100644
-index 0000000..367393c
+index 0000000..a98c2da
 --- /dev/null
 +++ b/src/components/video-editor/touchZoomPolicy.test.ts
-@@ -0,0 +1,201 @@
+@@ -0,0 +1,220 @@
 +import { describe, expect, it } from "vitest";
 +import { CURSOR_MOTION_PRESETS } from "./cursorMotionPresets";
 +import { buildInteractionZoomSuggestions } from "./timeline/zoomSuggestionUtils";
@@ -8880,6 +8957,7 @@ index 0000000..367393c
 +import { clampFocusToScale } from "./videoPlayback/focusUtils";
 +import { computeRegionStrength, getZoomRegionTiming } from "./videoPlayback/zoomRegionUtils";
 +import {
++	TOUCH_DEFAULT_DURATION_MS,
 +	TOUCH_TRAILING_RESERVE_MS,
 +	TOUCH_WIDE_BEAT_MS,
 +	TOUCH_ZOOM_LEAD_MS,
@@ -8937,7 +9015,7 @@ index 0000000..367393c
 +			const envelope = { startMs: region.start, endMs: region.end, fitTransitions: true as const };
 +			const preset = CURSOR_MOTION_PRESETS.focused;
 +			const { zoomInEnd, zoomOutStart } = getZoomRegionTiming(envelope, preset);
-+			expect(computeRegionStrength(envelope, tap, preset)).toBeGreaterThan(0.35);
++			expect(computeRegionStrength(envelope, tap, preset)).toBeGreaterThan(0.85);
 +			expect(zoomOutStart).toBeGreaterThanOrEqual(zoomInEnd + 90);
 +			expect(computeRegionStrength(envelope, (zoomInEnd + zoomOutStart) / 2, preset)).toBe(1);
 +			expect(computeRegionStrength(envelope, region.end, preset)).toBe(0);
@@ -8954,7 +9032,9 @@ index 0000000..367393c
 +			[click(3000), release(3080), click(3350), release(3430)],
 +			10_000,
 +		);
-+		expect(result.suggestions).toEqual([{ start: 2800, end: 4800, focus: { cx: 0.5, cy: 0.5 } }]);
++		expect(result.suggestions).toEqual([
++			{ start: 3000 - TOUCH_ZOOM_LEAD_MS, end: 3000 - TOUCH_ZOOM_LEAD_MS + TOUCH_DEFAULT_DURATION_MS, focus: { cx: 0.5, cy: 0.5 } },
++		]);
 +	});
 +
 +	it("frames different targets when there is room for both moves, even inside the repeat window", () => {
@@ -8963,8 +9043,16 @@ index 0000000..367393c
 +			10_000,
 +		);
 +		expect(result.suggestions).toEqual([
-+			{ start: 2800, end: 3430, focus: { cx: 0.25, cy: 0.5 } },
-+			{ start: 3530, end: 5530, focus: { cx: 0.75, cy: 0.5 } },
++			{
++				start: 3000 - TOUCH_ZOOM_LEAD_MS,
++				end: 3730 - TOUCH_ZOOM_LEAD_MS - TOUCH_WIDE_BEAT_MS,
++				focus: { cx: 0.25, cy: 0.5 },
++			},
++			{
++				start: 3730 - TOUCH_ZOOM_LEAD_MS,
++				end: 3730 - TOUCH_ZOOM_LEAD_MS + TOUCH_DEFAULT_DURATION_MS,
++				focus: { cx: 0.75, cy: 0.5 },
++			},
 +		]);
 +	});
 +
@@ -8973,7 +9061,9 @@ index 0000000..367393c
 +			[click(9050), release(9130), click(9750), release(9830)],
 +			10_000,
 +		);
-+		expect(result.suggestions).toEqual([{ start: 8850, end: 9640, focus: { cx: 0.5, cy: 0.5 } }]);
++		expect(result.suggestions).toEqual([
++			{ start: 9050 - TOUCH_ZOOM_LEAD_MS, end: 9640, focus: { cx: 0.5, cy: 0.5 } },
++		]);
 +	});
 +
 +	it("frames neighboring taps without crossing an existing zoom or replacing it", () => {
@@ -8984,8 +9074,8 @@ index 0000000..367393c
 +			{ reservedSpans: [{ start: 4080, end: 5000 }] },
 +		);
 +		expect(result.suggestions.map(({ start, end }) => ({ start, end }))).toEqual([
-+			{ start: 3350, end: 4080 },
-+			{ start: 5000, end: 7000 },
++			{ start: 3550 - TOUCH_ZOOM_LEAD_MS, end: 4080 },
++			{ start: 5000, end: 5000 + TOUCH_DEFAULT_DURATION_MS },
 +		]);
 +	});
 +
@@ -8996,17 +9086,23 @@ index 0000000..367393c
 +			true,
 +			{ clipRegions: [{ id: "clip", startMs: 1000, endMs: 4000, sourceStartMs: 4000, speed: 2 }] },
 +		);
-+		expect(result.suggestions).toEqual([{ start: 1200, end: 3200, focus: { cx: 0.5, cy: 0.5 } }]);
++		expect(result.suggestions).toEqual([
++			{
++				start: 1400 - TOUCH_ZOOM_LEAD_MS,
++				end: 1400 - TOUCH_ZOOM_LEAD_MS + TOUCH_DEFAULT_DURATION_MS,
++				focus: { cx: 0.5, cy: 0.5 },
++			},
++		]);
 +	});
 +
-+	it("starts a touch region with the tap, not a second before it", () => {
++	it("starts a touch region shortly before the tap with a crisp duration", () => {
 +		const samples = [click(3000), release(3080), click(7000), release(7080)];
 +		const result = suggestions(samples, 12_000);
 +		expect(result.suggestions).toHaveLength(2);
 +		for (const [index, region] of result.suggestions.entries()) {
 +			const tap = [3000, 7000][index];
 +			expect(Math.abs(region.start - (tap - TOUCH_ZOOM_LEAD_MS))).toBeLessThanOrEqual(1);
-+			expect(region.end - region.start).toBeGreaterThanOrEqual(1900);
++			expect(region.end - region.start).toBe(TOUCH_DEFAULT_DURATION_MS);
 +		}
 +	});
 +
@@ -9050,15 +9146,15 @@ index 0000000..367393c
 +		expect(result.suggestions).toEqual([]);
 +	});
 +
-+	it("brings edge taps within reach by choosing a deeper zoom", () => {
-+		expect(touchZoomDepth({ cx: 0.5, cy: 0.5 })).toBe(1);
-+		expect(touchZoomDepth({ cx: 0.5, cy: 0.35 })).toBe(1);
++	it("uses consistent 1.5x touch depth across taps while keeping targets comfortably inside the viewport", () => {
++		expect(touchZoomDepth({ cx: 0.5, cy: 0.5 })).toBe(2);
++		expect(touchZoomDepth({ cx: 0.5, cy: 0.35 })).toBe(2);
 +		expect(touchZoomDepth({ cx: 0.5, cy: 0.267 })).toBe(2);
-+		expect(touchZoomDepth({ cx: 0.5, cy: 0.2 })).toBe(3);
-+		expect(touchZoomDepth({ cx: 0.9, cy: 0.9 })).toBe(3);
++		expect(touchZoomDepth({ cx: 0.5, cy: 0.2 })).toBe(2);
++		expect(touchZoomDepth({ cx: 0.9, cy: 0.9 })).toBe(2);
 +	});
 +
-+	it("keeps the rendered focus close to the actual tap", () => {
++	it("keeps the rendered focus inside the 1.5x portrait frame", () => {
 +		const taps = [
 +			{ cx: 0.5, cy: 0.5 },
 +			{ cx: 0.5, cy: 0.2 },
@@ -9069,17 +9165,17 @@ index 0000000..367393c
 +			const depth = touchZoomDepth(tap);
 +			const clamped = clampFocusToScale(tap, ZOOM_DEPTH_SCALES[depth]);
 +			const error = Math.max(Math.abs(clamped.cx - tap.cx), Math.abs(clamped.cy - tap.cy));
-+			expect(error).toBeLessThanOrEqual(0.19);
++			expect(error).toBeLessThanOrEqual(0.24);
 +		}
 +	});
 +});
 diff --git a/src/components/video-editor/touchZoomPolicy.ts b/src/components/video-editor/touchZoomPolicy.ts
 new file mode 100644
-index 0000000..5bffc89
+index 0000000..eb1a4c8
 --- /dev/null
 +++ b/src/components/video-editor/touchZoomPolicy.ts
-@@ -0,0 +1,88 @@
-+import { ZOOM_DEPTH_SCALES, type ZoomDepth, type ZoomFocus } from "./types";
+@@ -0,0 +1,76 @@
++import type { ZoomDepth, ZoomFocus } from "./types";
 +
 +/**
 + * Auto-zoom parameters for touch hosts.
@@ -9101,9 +9197,10 @@ index 0000000..5bffc89
 + */
 +export const TOUCH_CLICK_MERGE_GAP_MS = 800;
 +export const TOUCH_TRAILING_RESERVE_MS = 360;
-+export const TOUCH_ZOOM_LEAD_MS = 200;
++export const TOUCH_ZOOM_LEAD_MS = 250;
++export const TOUCH_DEFAULT_DURATION_MS = 1300;
 +export const TOUCH_WIDE_BEAT_MS = 100;
-+export const TOUCH_MIN_AFTER_TAP_MS = 320;
++export const TOUCH_MIN_AFTER_TAP_MS = 300;
 +const TOUCH_REPEAT_FOCUS_RADIUS = 0.12;
 +
 +export function isSameTouchFocus(a: ZoomFocus, b: ZoomFocus): boolean {
@@ -9122,6 +9219,7 @@ index 0000000..5bffc89
 +	mergeGapMs?: number;
 +	touchTiming?: {
 +		leadMs: number;
++		defaultDurationMs?: number;
 +		wideBeatMs: number;
 +		minAfterTapMs: number;
 +		trailingReserveMs: number;
@@ -9134,6 +9232,7 @@ index 0000000..5bffc89
 +		mergeGapMs: TOUCH_CLICK_MERGE_GAP_MS,
 +		touchTiming: {
 +			leadMs: TOUCH_ZOOM_LEAD_MS,
++			defaultDurationMs: TOUCH_DEFAULT_DURATION_MS,
 +			wideBeatMs: TOUCH_WIDE_BEAT_MS,
 +			minAfterTapMs: TOUCH_MIN_AFTER_TAP_MS,
 +			trailingReserveMs: TOUCH_TRAILING_RESERVE_MS,
@@ -9142,30 +9241,15 @@ index 0000000..5bffc89
 +}
 +
 +/**
-+ * Pick the shallowest depth that can still centre the tap.
++ * Use a steady 1.5× touch depth across phone captures so adjacent taps never
++ * bounce between shallow 1.25× nudges and tight 1.8× edge crops.
 + *
-+ * A zoom places the tap at the middle of the crop, so the reachable focus range
-+ * for a depth is `[0.5/scale, 1 - 0.5/scale]`: 1.25× can only centre the middle
-+ * 20% of the screen, 1.8× reaches the middle 44%. A touch target near an edge
-+ * (a bottom navigation row, a side button) was previously clamped back toward
-+ * the centre and read as "the zoom missed the tap". Choosing the shallowest
-+ * depth whose clamp keeps the target within a tenth of the frame keeps central
-+ * taps gentle while letting edge taps land.
-+ *
-+ * The 1.8× cap keeps an edge tap from becoming a disorienting close-up.
++ * At 1.5×, `clampFocusToScale` keeps the centre within `[1/3, 2/3]`: edge tabs
++ * and toolbar buttons still land inside the zoomed viewport with their sibling
++ * controls and popup menus visible rather than cutting across narrow portrait UI.
 + */
-+export function touchZoomDepth(focus: ZoomFocus): ZoomDepth {
-+	const cx = Math.max(0, Math.min(focus.cx, 1));
-+	const cy = Math.max(0, Math.min(focus.cy, 1));
-+	for (const depth of [1, 2, 3] as const) {
-+		const margin = 1 / (2 * ZOOM_DEPTH_SCALES[depth]);
-+		const error = Math.max(
-+			Math.abs(Math.max(margin, Math.min(cx, 1 - margin)) - cx),
-+			Math.abs(Math.max(margin, Math.min(cy, 1 - margin)) - cy),
-+		);
-+		if (error <= 0.1 + 1e-6) return depth;
-+	}
-+	return 3;
++export function touchZoomDepth(_focus: ZoomFocus): ZoomDepth {
++	return 2;
 +}
 diff --git a/src/components/video-editor/types.ts b/src/components/video-editor/types.ts
 index 3087174..39120a6 100644

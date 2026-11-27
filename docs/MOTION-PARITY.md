@@ -28,16 +28,22 @@ from it.
 
 ## Android timing
 
-Start each spaced tap's approach 200 ms before the detected press. Keep the
-adaptive 1.25× / 1.5× / 1.8× framing, the Focused spring shape, and a wide beat
-of at least 100 ms between automatically scheduled visits in the same clip.
+Start each spaced tap's approach 250 ms before the detected press with a
+1300 ms default touch visit duration (matching `portfolio.mp4`'s 1.2–1.4 s
+isolated button clicks rather than holding 2.0 s across UI transitions).
+Use a consistent 1.5× framing (`depth: 2`), the Focused spring shape, and a
+wide beat of at least 100 ms between automatically scheduled visits in the
+same clip. The 250 ms lead reaches ~90% zoom as the press lands and starts
+gliding back wide right as the 420 ms tap pulse ends (~436 ms after press),
+preventing the camera from lagging behind taps or hanging zoomed on settled
+screens.
 When there is not enough time for a full visit, shorten the block and fit its
 two spring ramps around a brief hold. Independent ramps could almost cancel
 each other in a short block; resetting the spring or snapping the camera is
 not needed. Very late taps still draw a pulse rather than starting a move that
 cannot finish before the cut. Repeats near the same focus can share a visit.
-Taps on different targets get separate visits when the 200 ms lead, 100 ms
-wide beat, and 320 ms post-release hold fit. Otherwise the later tap keeps
+Taps on different targets get separate visits when the 250 ms lead, 100 ms
+wide beat, and 300 ms post-release hold fit. Otherwise the later tap keeps
 its pulse without extending the earlier visit. A late tap cannot cancel an
 earlier visit that fits.
 
@@ -55,28 +61,33 @@ the actual Sileo 0.1.6 component, not a native drawing: `SileoOverlay.kt` hosts
 blur/alpha-threshold filter, 600 ms spring with 0.25 bounce and header morph
 come from the vendored MIT source (`src/components/launch/sileo`).
 
-- **Entrance:** the native window is placed at the top from its first frame;
-  there is **no bottom-to-top travel**. The page pre-paints one Sileo-shaped
-  boot pill, which performs the only entrance: a 500 ms top-anchored pop
-  (scale/translate/opacity) with a small spring overshoot. When it finishes, the
-  real Sileo pill is revealed in the same frame at identical geometry and the
-  boot is removed, so there is no second entrance. Arrival is **compact**: it
-  does not auto-expand. The native window is pill-sized (380×128 px at 360 dp),
-  so taps beside it reach the app.
-- **Expansion:** tapping the whole 40 px pill widens the native window and
-  uncovers the already-laid-out controls; the WebView keeps the expanded width
-  from the first frame, so the pill/header is never reflowed horizontally.
-  The recorder's Sileo spring is critically damped (`bounce: 0`): it expands
-  from the pill to the measured body once and stops, with no overshoot or
-  settle-back wobble. The body fill is opaque from the first pixel; only its
-  height animates, so the app behind cannot ghost through the card. Content
-  fades in over 160 ms (the upstream toast delay is shortened so the setup never
-  shows an empty black card).
-- **Idle fold:** 20 s without pointer or keyboard activity folds the body back
-  to the compact pill; any interaction resets the timer. The pill remains and
-  can be tapped again.
-- **Fold/dismiss:** a touch outside the compact window is observed with
-  `FLAG_WATCH_OUTSIDE_TOUCH` and folds the body without consuming the app's tap.
+- **Entrance:** the overlay container is placed at the top from its first frame
+  inside `MainActivity`'s root (`OverlayRoot`, gated on **Display over other
+  apps**); there is **no bottom-to-top travel**. The page pre-paints one
+  Sileo-shaped boot pill, which performs the only entrance: a 500 ms
+  top-anchored pop (scale/translate/opacity) with a small spring overshoot.
+  When it finishes, the real Sileo pill is revealed in the same frame at
+  identical geometry and the boot is removed, so there is no second entrance.
+  Arrival is **compact**: it does not auto-expand. While compact, `OverlayRoot`
+  only delivers touches inside the pill bounds so taps beside it reach the app.
+- **Expansion:** the `WebView` and `<svg>` filter viewport stay at fixed
+  expanded dimensions from the first frame, avoiding WindowManager move
+  animations, WebView height-resize `rAF` stalls, and untouchable-window 0.8
+  alpha clamping; the pill/header never shifts horizontally. The recorder's
+  Sileo spring is critically damped (`bounce: 0`): it expands from the pill to
+  the measured body once and stops, with no overshoot or settle-back wobble.
+  The body fill is opaque from the first pixel and `[data-sileo-content]` is
+  height-clipped (`overflow: hidden`) on the same body spring, so controls reveal
+  cleanly inside the dark surface as it opens. Content fades in over 160 ms
+  (the upstream toast delay is shortened so the setup never shows an empty
+  black card).
+- **Idle fold / compact dismiss:** 20 s without pointer or keyboard activity folds
+  an open body back to the compact pill; any interaction resets the timer. If
+  the pill remains unexpanded for 10 s, it auto-dismisses with a 240 ms reverse
+  boot-pop (`translateY(-7px) scale(0.9)` and fade); a repeated Home press
+  refreshes the 10 s timer without expanding it.
+- **Fold/dismiss:** a touch outside the expanded card folds the body cleanly
+  while letting the tap pass through to the app underneath.
   System Back or Cancel closes after the exit animation; leaving TapSwoop
   dismisses the setup.
 - **Early start:** Home starts the overlay on the press, while its own 320 ms
@@ -377,3 +388,36 @@ For a take that needs SystemUI today, verify the built-in recorder's clip shows
 the desired UI before importing it. It will not have Recordly tap telemetry;
 zooms must be placed manually. Trimming, freezing or cropping does not restore
 SystemUI and is not a capture fix.
+
+### Multi-app telemetry and reference timing parity check (2026-11-27)
+
+Compared the Windows reference (`portfolio.mp4`, whose isolated navigation
+clicks complete in 1.2–1.4 s at ~1.5× framing) against live Android captures.
+Prior Android defaults held every spaced visit for 2000 ms with 200 ms lead
+and varied depths (`1.25×` / `1.5×` / `1.8×`), while `TYPE_VIEW_SELECTED` was
+restricted to Play Store bottom tabs and Home launcher fallback only handled
+OxygenOS `com.android.launcher`.
+
+Updated behavior verified on `Medium_Phone_API_37.0`:
+- **System-wide tabs & launcher launches (`TouchTelemetry.kt`):** generalized
+  `TYPE_VIEW_SELECTED` horizontal navigation tab recognition across apps
+  (rejecting initial activity open noise, ViewPagers, and vertical lists),
+  added generic Home/dock launcher icon matching across installed launchers
+  (including Pixel Launcher when it omits `TYPE_VIEW_CLICKED`), back-dated
+  Chrome overflow popup arrival to align with the button press, and filtered
+  off-screen slide bounds and oversized background containers.
+- **Timing and consistent framing (`touchZoomPolicy.ts` / `zoomSuggestionUtils.ts`):**
+  1300 ms touch visit duration, 250 ms lead, 300 ms post-release hold, and
+  steady 1.5× (`depth: 2`) framing so edges retain neighboring UI context and
+  the camera zooms out promptly as transitions finish.
+- **Clock auto-zoom + 60 fps export (`verify-autozoom.mjs`, `verify-motion-export.mjs`):**
+  4 taps produced 4 fitted 1.5× visits (`1131 ms` / `1300 ms` / `1134 ms` /
+  `1300 ms`) with 250 ms lead, 100 ms wide beats, and 0 swipe zooms. Export:
+  576×1280 H.264, `1076` frames at 60/1 fps (`0.00067 ms` max frame-interval
+  error), verified visually in 10 fps frame sheets.
+- **Multi-app real capture + export (`multiapp-report.json`):** 7/7 taps
+  captured (Pixel Launcher Chrome dock, Chrome three-dot menu, Chrome tab
+  switcher, Clock `Alarms`/`Timers`/`Stopwatch` tabs, Settings `Data Saver`
+  row after an ignored scroll swipe); all 7 produced 1300 ms fitted 1.5× visits
+  at exact target coordinates and exported cleanly at 576×1280 H.264, `1372`
+  frames, 60/1 fps (`0.00067 ms` max interval error).

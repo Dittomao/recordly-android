@@ -131,14 +131,17 @@ never commit its media.
 
 ## Approved motion contract (do not drift)
 
-- 200 ms lead before the tap; 100 ms wide beat between automatic visits in the
-  same clip; at least 320 ms of hold after the last press.
+- 250 ms lead before the tap; 1300 ms default touch visit duration (matching
+  `portfolio.mp4`'s 1.2–1.4 s navigation clicks); 100 ms wide beat between
+  automatic visits in the same clip; at least 300 ms of hold after the last
+  press.
 - Nearby rapid repeats can share a visit. Distinct targets get their own visit
   if both fit; a tap that cannot fit still keeps its pulse. On Android, the
   empty Zoom lane seeks; the **Add zoom** button creates manual blocks.
 - Focused preset: 200 ms in / 285.7 ms out, sampled from the shared spring by
   timestamp in both preview and export.
-- Adaptive depth 1.25× / 1.5× / 1.8×; edge targets get the deeper crop.
+- Steady 1.5× (`depth: 2`) touch framing across phone captures so center and
+  edge targets keep clear context without jarring 1.25×/1.8× jumps.
 - Compact blocks fit the ramps around a short hold (`fitTransitions: true`);
   existing zoom edits keep their boundaries.
 - Camera motion blur 0.20, only while moving; blue `echo` tap pulse, 420 ms,
@@ -156,7 +159,7 @@ The reference measurements and the verified outputs are in
 | `android/app/src/main/java/app/recordly/android/AppHost.kt` | Process-wide renderer install, media registry, loopback token and server |
 | `.../MainActivity.kt` | Single WebView, insets, surfaces (`editor`, `hud-overlay`), file chooser, capture hooks |
 | `.../NativeBridge.kt` | Native half of `window.electronAPI`; `dispatch`/`dispatchSync` are the seam |
-| `.../SileoOverlay.kt` | Transparent WebView overlay for the vendored Sileo setup; centre-to-top entrance, outside-touch watch and capture handoff |
+| `.../SileoOverlay.kt` | Transparent WebView overlay for the vendored Sileo setup; selective pill/outside touch routing and capture handoff |
 | `recordly-upstream/src/components/launch/RecorderSetup.tsx` | Sileo recorder surface, boot-pill handoff and `TapswoopRecorder` bridge |
 | `recordly-upstream/src/components/launch/sileo/` | Vendored Sileo 0.1.6 (MIT, pinned `b70fd82`); keep its source and notice |
 | `.../CaptureSession.kt` | Capture state machine, consent, stop/fallback, events |
@@ -217,27 +220,32 @@ The reference measurements and the verified outputs are in
 - The real Sileo 0.1.6 component runs in a transparent WebView overlay. Home and
   the setup share `CutRoomRecordButton`; the setup Record control gets the same
   reveal animation.
-- The native window is placed at the **top from its first frame**; there is no
-  bottom-to-top travel. A static boot pill performs the only entrance, a
+- The native host container is placed at the **top from its first frame**; there
+  is no bottom-to-top travel. A static boot pill performs the only entrance, a
   top-anchored Dynamic Island pop, then hands off to the real Sileo pill at
-  identical geometry. It arrives as a **compact 380×128 px pill** (at 360 dp).
-  Tapping the whole 40 px pill expands the body on a critically damped 600 ms
-  Sileo spring (`bounce: 0`, no overshoot or settle-back wobble). The body fill
-  is opaque from the first pixel, so the Home cannot ghost through during the
-  expansion; 20 s without pointer/keyboard activity folds it back. The compact window is
-  pill-sized, so taps beside it reach the app. The WebView is fixed at the
-  expanded width and the compact window crops its centre, so opening never
-  reflows the pill. Home's press starts the overlay during its reveal, but
-  never expands it.
-- On the API 37 emulator, an outside tap folded the setup and opened the
-  project underneath, proving the tap reaches the app. System Back and Cancel
-  closed it. The setup stayed over the editor (same foreground task) without
-  dimming it; leaving TapSwoop dismisses it, and a fresh launch shows no
-  leftover setup.
+  identical geometry. It arrives compact (at 360 dp, the `WebView` is fixed at
+  expanded dimensions inside `MainActivity`'s root `OverlayRoot` with
+  `Display over other apps` gated in `SileoOverlay.show()`, so opening never
+  triggers Android WindowManager move animations, WebView height-resize `rAF`
+  stalls, or untouchable overlay 0.8 alpha clamping). Selective touch dispatch
+  forwards only taps on the compact pill bounds so taps beside it reach the app;
+  tapping the whole 40 px pill expands the body on a critically damped 600 ms
+  Sileo spring (`bounce: 0`, no overshoot or horizontal/settle-back wobble).
+  The body fill is 100% opaque from the first pixel and `[data-sileo-content]`
+  animates height with `overflow: hidden` in lockstep with `<motion.rect
+  data-sileo-body>` so controls reveal cleanly inside the dark card without
+  bleeding over Home; 20 s without pointer/keyboard activity folds it back,
+  and an unexpanded pill auto-dismisses after 10 s with a reverse pop exit.
+  Home's press starts the overlay during its reveal (refreshing the 10 s timer
+  if already compact), but never expands it.
+- On the API 37 emulator, tapping beside the compact pill opened Settings, an
+  outside tap folded the setup and reached the app underneath, System Back and
+  Cancel closed it, and frame-by-frame capture confirmed 0.03 px horizontal pill
+  stability with crisp 100% fill opacity and clipped content reveal. The setup
+  stayed over the editor (same foreground task) without dimming it; leaving
+  TapSwoop dismisses it, and a fresh launch shows no leftover setup.
 - Start → Android consent → notification Stop opened the 7.57 s take in the
   editor. Its raw 720×1600 MP4 has no overlay and no black cutout.
-- Sensitive screens that hide non-system overlays (Settings) hide the setup;
-  a heads-up notification can cover it briefly. Both are Android policy.
 - Still open: persistent pause/stop during capture, camera, TalkBack traversal
   of the overlay WebView, and real-device checks.
 
@@ -273,12 +281,14 @@ The reference measurements and the verified outputs are in
   the OnePlus compatibility report was submitted and a response is pending. See the
   [capture investigation](docs/MOTION-PARITY.md#next-systemui-capture-check);
   preserve system privacy protections and approved motion.
-- Touch focus is the clicked view's centre, not the finger. Non-clickable
-  surfaces produce no zoom. The Play Store bottom navigation and Chrome
-  overflow popup use their verified accessibility control bounds when they
-  do not report explicit clicks. OxygenOS cold and warm launches of Play Store
-  and Chrome from their observed dock bounds have a separate fallback.
-  Observe-only accessibility is deliberate;
+- Touch focus is the clicked view's clipped on-screen centre (rejecting
+  oversized background containers and off-screen slide artifacts). Non-clickable
+  surfaces produce no zoom. `TYPE_VIEW_SELECTED` catches horizontal
+  navigation tabs and segmented bars across apps (filtering out initial launch
+  selections, ViewPagers, and lists), Chrome's overflow popup aligns with the
+  three-dot toolbar button without waiting for popup settle, and Home/dock
+  launches across installed launchers fall back to observed icon bounds when
+  the launcher consumes its click. Observe-only accessibility is deliberate;
   `setMotionEventSources` would consume input from the recorded app.
 - Imported clips have no Recordly telemetry, so zooms must be added manually.
 - Compatible clip appends copy samples. Mixed formats use Media3 at the base

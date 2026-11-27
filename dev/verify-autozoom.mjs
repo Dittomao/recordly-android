@@ -133,16 +133,15 @@ async function waitForLog(pattern, timeout = 20_000) {
 	throw new Error(`Capture did not reach ${pattern}\n${await captureLog()}`);
 }
 
-async function stopRecording(page) {
+async function stopRecording(page, usedSileo = false) {
 	await shell(["cmd", "statusbar", "collapse"]);
-	// The recording backgrounds Recordly. Bring its single task back before
-	// asking Playwright to wait for a stable, visible HUD control.
 	await shell(["am", "start", "-W", "-n", `${packageName}/app.recordly.android.MainActivity`]);
-	// Click the HUD's Stop control. This runs the renderer's full stop
-	// sequence, which sets the new video as current and opens the editor.
-	// Calling stopNativeScreenRecording directly only stops the native
-	// service, so the editor has no new project to load.
-	await page.getByRole("button", { name: "Stop", exact: true }).click({ timeout: 60_000 });
+	if (usedSileo) {
+		await page.evaluate(() => window.electronAPI.stopNativeScreenRecording());
+	} else {
+		// Click the HUD's Stop control so the renderer opens the editor with the take.
+		await page.getByRole("button", { name: "Stop", exact: true }).click({ timeout: 60_000 });
+	}
 	const log = await waitForLog(/recording written: (.+\.mp4) \(/, 60_000);
 	const sourcePath = log.match(/recording written: (.+\.mp4) \(/)[1];
 	await shell(["cmd", "statusbar", "collapse"]);
@@ -190,33 +189,44 @@ try {
 		.flatMap((context) => context.pages())
 		.find((candidate) => candidate.url().startsWith("http://127.0.0.1:"));
 	assert.ok(page, "Recordly renderer not found");
-	if (!page.url().includes("windowType=hud-overlay")) {
-		for (let attempt = 0; attempt < 3 && !page.url().includes("windowType=hud-overlay"); attempt++) {
+	let recorderPage = browser
+		.contexts()
+		.flatMap((context) => context.pages())
+		.find((candidate) => candidate.url().includes("recorder.html"));
+	let usedSileo = Boolean(recorderPage);
+	if (!usedSileo && !page.url().includes("windowType=hud-overlay")) {
+		for (let attempt = 0; attempt < 3 && !usedSileo && !page.url().includes("windowType=hud-overlay"); attempt++) {
 			await page
 				.evaluate(() => {
 					setTimeout(() => window.electronAPI.showRecordingHud(), 100);
 				})
-				.catch(() => {
-					// The HUD switch reloads the WebView; on a slow emulator the
-					// navigation can begin before evaluate returns its reply.
-				});
-			try {
-				await page.waitForURL(/windowType=hud-overlay/, { timeout: 20_000 });
-			} catch {
-				// Retry: a stale native surface flag can make the first request a
-				// no-op immediately after a take.
+				.catch(() => {});
+			await delay(1_200);
+			const pages = browser.contexts().flatMap((context) => context.pages());
+			recorderPage = pages.find((candidate) => candidate.url().includes("recorder.html"));
+			if (recorderPage) {
+				usedSileo = true;
+				break;
 			}
+			await shell(["am", "start", "-W", "-n", `${packageName}/app.recordly.android.MainActivity`]);
+			await delay(800);
 			page = browser
 				.contexts()
 				.flatMap((context) => context.pages())
 				.find((candidate) => candidate.url().startsWith("http://127.0.0.1:"));
 		}
-		assert.ok(page.url().includes("windowType=hud-overlay"), "Could not open the recording HUD");
+		assert.ok(usedSileo || page.url().includes("windowType=hud-overlay"), "Could not open the recording HUD or Sileo overlay");
 	}
-	await page.waitForTimeout(500);
-
 	await shell(["logcat", "-c"]);
-	await page.getByRole("button", { name: "Record", exact: true }).click({ timeout: 90_000 });
+	if (usedSileo) {
+		await recorderPage.waitForFunction(() => document.querySelector(".recorder-stage")?.getAttribute("data-phase") === "setup");
+		await recorderPage.locator("[data-sileo-header]").click({ timeout: 20_000 });
+		await delay(400);
+		await recorderPage.getByRole("button", { name: "New recording" }).click({ timeout: 20_000 });
+	} else {
+		await page.waitForTimeout(500);
+		await page.getByRole("button", { name: "Record", exact: true }).click({ timeout: 90_000 });
+	}
 	const consentDeadline = Date.now() + 60_000;
 	let sourceSheetOpened = false;
 	while (Date.now() < consentDeadline) {
@@ -259,7 +269,7 @@ try {
 		if (/capture started/.test(await captureLog())) break;
 		await delay(acted ? (sourceSheetOpened ? 1_500 : 600) : 300);
 	}
-	await waitForLog(/capture resumed/);
+	await waitForLog(usedSileo ? /timeline aligned to first frame/ : /capture resumed/);
 	await delay(1_500);
 
 	// Four taps around a swipe on the Clock timer keypad. Clock is far
@@ -301,7 +311,7 @@ try {
 	await delay(1_200);
 	const taps = [tap1, tap2, tap3, tap4];
 
-	const sourcePath = await stopRecording(page);
+	const sourcePath = await stopRecording(page, usedSileo);
 	completed = true;
 	await delay(3_000);
 
@@ -404,7 +414,7 @@ try {
 			clicks.length,
 			`expected one zoom region per tap; ${clicks.length} taps, ${regions.length} regions`,
 		);
-		assert.ok(regions.slice(0, -1).some(({ startMs, endMs }) => endMs - startMs < 1800),
+		assert.ok(regions.slice(0, -1).some(({ startMs, endMs }) => endMs - startMs < 1300),
 			"the fixture did not exercise a compact zoom before another tap");
 		for (const [index, click] of clicks.entries()) {
 			if (screen) {
@@ -419,11 +429,12 @@ try {
 			// Touch has no cursor: the zoom must start with the tap, not the
 			// desktop one-second pre-roll.
 			const leadMs = click.timeMs - region.startMs;
-			assert.equal(leadMs, 200, `tap at ${click.timeMs}ms does not have the Android 200 ms lead`);
+			assert.equal(leadMs, 250, `tap at ${click.timeMs}ms does not have the Android 250 ms lead`);
 			assert.equal(region.fitTransitions, true, "saved auto-zoom must retain fitted transitions");
 			// Depth is chosen so the rendered focus can reach the tap rather
 			// than clamping an edge tap back toward the centre.
-			const expectedDepth = [1, 2, 3].find((depth) => errorAt(click, depth) <= 0.1 + 1e-6) ?? 3;
+			// Consistent 1.5x framing on touch targets avoids abrupt 1.25x / 1.8x jumps.
+			const expectedDepth = 2;
 			assert.equal(
 				region.depth,
 				expectedDepth,

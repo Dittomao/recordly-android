@@ -86,28 +86,28 @@ treating the API level as the gate.
   component (vendored MIT, pinned commit) in a small transparent WebView
   overlay once **Display over other apps** is granted. It is not a native
   drawing of Sileo: the SVG goo filter, 600 ms spring, header morph and content
-  fade are upstream. The native window is placed at the top from its first
-  frame; it never flies in from the bottom. A static Sileo-shaped pill performs
-  the **only** entrance, a top-anchored Dynamic Island pop, then hands off to
-  the real Sileo pill in the same frame at identical geometry. It arrives
-  **compact**: tapping the 40 px pill opens the body on the recorder's
-  critically damped Sileo spring (`bounce: 0`, so it expands once and stops).
-  The body fill is opaque from the first pixel; only its height animates, so
-  the Home behind cannot ghost through the card while it grows. 20 s without
-  pointer or keyboard activity folds it back. The native window is only
-  as large as the compact pill (380×128 px at 360 dp), so taps beside it reach
-  the app. The WebView itself is laid out at the expanded body width from the
-  start; the compact window is a centre crop of that fixed page. Tapping widens
-  the window and uncovers the controls instead of reflowing the pill, so the
-  header cannot move when it is opened. The setup uses the same **Record**
-  control as Home, with **Mic** and **Screen**. Home's press starts the overlay
-  while its own reveal is still running, but the press itself never expands the
-  pill. A tap outside folds it
-  without consuming the app's tap (`FLAG_WATCH_OUTSIDE_TOUCH`); system **Back**
-  or **Cancel** dismisses it. The setup exists only after Home's **New
-  recording** is pressed; leaving TapSwoop dismisses it, so a fresh launch
-  never shows a leftover setup. Apps that hide non-system overlays, such as
-  Settings, can hide it while they are in front.
+  fade are upstream. The container is placed at the top from its first
+  frame inside `MainActivity`'s root (`OverlayRoot`, still gated by **Display
+  over other apps**); it never flies in from the bottom. A static
+  Sileo-shaped pill performs the **only** entrance, a top-anchored Dynamic
+  Island pop, then hands off to the real Sileo pill in the same frame at
+  identical geometry. It arrives **compact**: tapping the 40 px pill opens the
+  body on the recorder's critically damped Sileo spring (`bounce: 0`, so it
+  expands once and stops with no horizontal or vertical wobble). Both the
+  `svg` filter box and fixed-dimensions `WebView` keep full expanded size
+  from the first frame, and `[data-sileo-content]` is height-clipped
+  (`overflow: hidden`) on the same body spring so controls reveal strictly
+  inside the opaque `#181818` card. 20 s without pointer or keyboard activity
+  folds it back, and an unexpanded pill auto-dismisses after 10 s with a
+  reverse pop exit (refreshed without expanding if Home's **New recording**
+  is tapped again). While compact, `OverlayRoot` forwards only touches within the
+  pill bounds so taps beside it reach the app; while expanded, touches outside
+  the card fold it without consuming the app's tap. System **Back** or
+  **Cancel** dismisses it. The setup exists only after Home's **New recording**
+  is pressed; leaving TapSwoop dismisses it, so a fresh launch never shows a
+  leftover setup. The setup uses the same **Record** control as Home, with
+  **Mic** and **Screen**. Home's press starts the overlay while its own reveal
+  is still running, but the press itself never expands the pill.
   Start removes the overlay before Android's screen-sharing consent, so the
   captured frames are clean. The foreground notification owns **Pause** and
   **Stop**; a stopped take opens in the editor natively. Without overlay

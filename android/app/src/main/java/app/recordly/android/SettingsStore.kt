@@ -67,5 +67,25 @@ class SettingsStore(context: Context) {
          * so the key lives here rather than in either of them.
          */
         const val PREF_HUD_CAPTURE_PROTECTION = "recordly.hud.captureProtection"
+
+        /** Recording device preferences shared between the bridge and Sileo setup. */
+        const val PREF_RECORDING = "recordly.recording.preferences"
+        const val KEY_MICROPHONE_ENABLED = "microphoneEnabled"
+    }
+
+    fun mergeRecordingPreference(key: String, value: Any?) {
+        val current = get(PREF_RECORDING)
+        val merged = if (current is JSONObject) JSONObject(current.toString()) else JSONObject()
+        merged.put(key, value ?: JSONObject.NULL)
+        set(PREF_RECORDING, merged)
+    }
+
+    fun preferredMicrophoneEnabled(defaultValue: Boolean = true): Boolean {
+        val stored = get(PREF_RECORDING) as? JSONObject ?: return defaultValue
+        return if (stored.has(KEY_MICROPHONE_ENABLED)) {
+            stored.optBoolean(KEY_MICROPHONE_ENABLED, defaultValue)
+        } else {
+            defaultValue
+        }
     }
 }
