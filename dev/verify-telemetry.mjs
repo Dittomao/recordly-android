@@ -11,9 +11,9 @@
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { shell, execOut, forward } from "./adb.mjs";
+import { appProcessId, shell, execOut, forward } from "./adb.mjs";
 
-const packageName = "app.recordly.android.debug";
+const packageName = "app.tapswoop.android.debug";
 const serviceName = `${packageName}/app.recordly.android.TelemetryAccessibilityService`;
 assert.match(process.env.RECORDLY_DEVICE || "emulator-5554", /^emulator-/, "Use a test emulator");
 const { chromium } = createRequire(import.meta.url)("../recordly-upstream/node_modules/playwright");
@@ -98,7 +98,7 @@ async function waitForLog(pattern, timeout = 20_000) {
 
 await enableTelemetry();
 await delay(1_500);
-const pid = (await shell(["pidof", packageName])).stdout.trim().split(/\s+/)[0];
+const pid = await appProcessId(packageName);
 assert.ok(pid, "Start Recordly on the emulator first");
 await forward(9222, `localabstract:webview_devtools_remote_${pid}`);
 const browser = await chromium.connectOverCDP("http://127.0.0.1:9222", { timeout: 10_000 });

@@ -8,7 +8,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,15 +19,19 @@ const DIST = join(UPSTREAM, "dist");
 const TARGET = join(PROJECT_ROOT, "android", "app", "src", "main", "assets", "renderer");
 const BRIDGE_SOURCE = join(PROJECT_ROOT, "bridge", "bridge.js");
 const HOST_SOURCE = join(PROJECT_ROOT, "bridge", "android.js");
+const STRINGS_SOURCE = join(PROJECT_ROOT, "android", "app", "src", "main", "res", "values", "strings.xml");
 
 const skipBuild = process.argv.includes("--skip-build");
 
 function run(command, args, cwd) {
+	const strings = readFileSync(STRINGS_SOURCE, "utf8");
+	const appName = strings.match(/<string name="app_name">([A-Za-z0-9 ]+)<\/string>/)?.[1].trim();
+	if (!appName) throw new Error(`Missing Android app_name in ${STRINGS_SOURCE}`);
 	console.log(`> ${command} ${args.join(" ")}`);
 	execFileSync(command, args, {
 		cwd,
 		stdio: "inherit",
-		env: { ...process.env, RECORDLY_RENDERER_ONLY: "1" },
+		env: { ...process.env, RECORDLY_RENDERER_ONLY: "1", RECORDLY_ANDROID_DISPLAY_NAME: appName },
 	});
 }
 

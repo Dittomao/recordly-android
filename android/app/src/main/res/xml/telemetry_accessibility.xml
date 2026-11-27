@@ -9,22 +9,24 @@
     service never calls `setMotionEventSources`, which would take the touch
     stream away from the app being recorded (see PORTING-PLAN §4.3).
 
-  * `typeViewScrolled` / `typeWindowStateChanged` give the path between taps so
-    zoom smoothing has something to follow.
+  * `typeViewSelected` is used only for Play Store's bottom navigation tabs.
+    `typeWindowStateChanged` confirms Chrome's overflow popup or a direct
+    launch from a known dock icon.
+    Other selections, window changes, focus changes and scrolls are not taps.
 
   * `canRetrieveWindowContent="true"` is required to read `event.source`, and
     `getBoundsInScreen` is the only way to turn a clicked *view* into a
-    normalized point. Nothing is scraped from the tree: the recorder reads
-    bounds and immediately drops the node.
+    normalized point. During active capture, the recorder reads bounds and
+    checks the control's role/state or known public dock labels. It never
+    records those labels.
 
-  * `flagReportViewIds` is off. It makes the framework resolve resource ids for
-    every event, which is measurable overhead in a service that runs during
-    capture, and nothing here needs ids.
+  * Window access and resource IDs identify the Chrome popup and the specific
+    toolbar button behind it. No raw touch input is intercepted.
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
-    android:accessibilityEventTypes="typeViewClicked|typeViewLongClicked|typeViewScrolled|typeViewFocused|typeWindowStateChanged|typeTouchInteractionStart|typeTouchInteractionEnd"
+    android:accessibilityEventTypes="typeViewClicked|typeViewLongClicked|typeViewSelected|typeWindowStateChanged|typeTouchInteractionStart|typeTouchInteractionEnd"
     android:accessibilityFeedbackType="feedbackGeneric"
-    android:accessibilityFlags="flagDefault"
+    android:accessibilityFlags="flagDefault|flagReportViewIds|flagRetrieveInteractiveWindows"
     android:canRetrieveWindowContent="true"
     android:description="@string/telemetry_service_description"
     android:notificationTimeout="0"

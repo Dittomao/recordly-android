@@ -1,8 +1,12 @@
 package app.recordly.android
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Color
 import android.media.projection.MediaProjectionConfig
 import android.media.projection.MediaProjectionManager
@@ -30,6 +34,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.CompletableFuture
 
 /**
  * Single-activity host for the Recordly renderer.
@@ -50,6 +55,11 @@ import java.io.File
 class MainActivity : ComponentActivity() {
 
     private lateinit var webView: WebView
+    private lateinit var root: FrameLayout
+    private val settingsStore by lazy { SettingsStore(this) }
+    private val chromeThemeListener = SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+        if (key == SettingsStore.PREF_THEME) applyWindowChrome()
+    }
     private var bridge: NativeBridge? = null
 
     /** Origin of the installed renderer; every surface is a path under it. */
@@ -79,6 +89,18 @@ class MainActivity : ComponentActivity() {
     private val permissionsLauncher =
         registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { granted ->
             CaptureSession.onPermissionsResult(granted)
+        }
+
+    /**
+     * One microphone prompt at a time, shared with the onboarding setup.
+     * Capture asks through its own launcher; this exists so the page can show
+     * the real grant before the user starts a take.
+     */
+    private var microphoneRequest: CompletableFuture<Boolean>? = null
+    private val microphoneLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            microphoneRequest?.complete(granted)
+            microphoneRequest = null
         }
 
     private val documentLauncher =
@@ -123,7 +145,6 @@ class MainActivity : ComponentActivity() {
         }
 
         webView = WebView(this).apply {
-            setBackgroundColor(Color.BLACK)
             settings.configureForApp()
             webChromeClient = consoleClient()
             webViewClient = navigationClient()
@@ -138,7 +159,7 @@ class MainActivity : ComponentActivity() {
             setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false)
         }
 
-        val root = FrameLayout(this).apply {
+        root = FrameLayout(this).apply {
             addView(
                 webView,
                 FrameLayout.LayoutParams(
@@ -162,10 +183,20 @@ class MainActivity : ComponentActivity() {
         }
         ViewCompat.requestApplyInsets(root)
         setContentView(root)
+        window.isStatusBarContrastEnforced = false
+        window.isNavigationBarContrastEnforced = false
+        settingsStore.registerListener(chromeThemeListener)
+        applyWindowChrome()
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (webView.canGoBack()) webView.goBack() else finish()
+                // Close the current Cut Room overlay before leaving the WebView.
+                webView.evaluateJavascript(
+                    "Boolean(window.__recordlyDismissCutRoomOverlay?.())",
+                ) { handled ->
+                    if (handled == "true" || isFinishing || isDestroyed) return@evaluateJavascript
+                    if (webView.canGoBack()) webView.goBack() else finish()
+                }
             }
         })
 
@@ -192,16 +223,75 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        settingsStore.unregisterListener(chromeThemeListener)
+        microphoneRequest?.complete(false)
+        microphoneRequest = null
         // An uncancelled callback leaves the page's input permanently busy.
         fileChooserCallback?.onReceiveValue(null)
         fileChooserCallback = null
         CaptureSession.detach()
+        if (isFinishing) SileoOverlay.hide()
         DocumentPicker.detach(this)
         (webView.parent as? ViewGroup)?.removeView(webView)
         webView.destroy()
         // The loopback server is owned by [AppHost] and outlives individual
         // activity instances on purpose; it is freed with the process.
         super.onDestroy()
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        applyWindowChrome()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Revoking "Display over other apps" from system settings removes the
+        // window on some builds and leaves our state pointing at it on others.
+        SileoOverlay.hideIfPermissionMissing(this)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        // The setup is a pre-recording surface, not a persistent widget: it
+        // appears only from Home's New recording and must not follow the user
+        // out of TapSwoop or greet them on the next launch. A live capture is
+        // owned by the foreground service and keeps its notification.
+        if (!CaptureSession.isRecording()) SileoOverlay.hide()
+    }
+
+    /** Prompt for the microphone from the activity that can show the dialog. */
+    private fun requestMicrophoneAccess(): CompletableFuture<Boolean> {
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
+            return CompletableFuture.completedFuture(true)
+        }
+        microphoneRequest?.let { return it }
+        val result = CompletableFuture<Boolean>()
+        microphoneRequest = result
+        try {
+            microphoneLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } catch (error: Exception) {
+            microphoneRequest = null
+            result.completeExceptionally(error)
+        }
+        return result
+    }
+
+    /** The native safe-area padding must carry the same color as the web app. */
+    private fun applyWindowChrome() {
+        val light = when (settingsStore.get(SettingsStore.PREF_THEME)) {
+            "light" -> true
+            "dark" -> false
+            else -> resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK !=
+                Configuration.UI_MODE_NIGHT_YES
+        }
+        val ground = getColor(if (light) R.color.cut_room_light_ground else R.color.cut_room_dark_ground)
+        root.setBackgroundColor(ground)
+        webView.setBackgroundColor(ground)
+        WindowCompat.getInsetsController(window, root).apply {
+            isAppearanceLightStatusBars = light
+            isAppearanceLightNavigationBars = light
+        }
     }
 
     // ------------------------------------------------------------------ //
@@ -214,11 +304,9 @@ class MainActivity : ComponentActivity() {
                 requestPermissions = { permissions -> permissionsLauncher.launch(permissions) },
                 requestProjection = {
                     val manager = getSystemService(MediaProjectionManager::class.java)
-                    // Android 14+ can request the default display directly
-                    // (the same public API a screen recorder uses). The no-arg
-                    // intent opens the "Share one app / Entire screen" chooser;
-                    // its single-app mode is not useful here and the choice
-                    // sheet does not include SystemUI on some devices.
+                    // Prefer a full-display request so users cannot
+                    // accidentally choose single-app capture, which excludes
+                    // system UI. Android still enforces its capture protections.
                     val intent =
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                             runCatching {
@@ -239,10 +327,32 @@ class MainActivity : ComponentActivity() {
                 onRecordingStarted = { runOnUiThread { enterRecordingChrome() } },
                 onRecordingStopped = {
                     runOnUiThread {
+                        SileoOverlay.hide()
                         exitRecordingChrome()
                         returnToForeground()
                     }
                 },
+                onRecordingFinished = { file ->
+                    runOnUiThread {
+                        SileoOverlay.hide()
+                        if (isFinishing || isDestroyed) {
+                            Log.w(TAG, "recording finished after the activity was destroyed")
+                            return@runOnUiThread
+                        }
+                        val current = bridge
+                        if (current == null) {
+                            Log.w(TAG, "recording finished without a bridge; leaving it for recovery")
+                            return@runOnUiThread
+                        }
+                        current.adoptRecording(file)
+                        // The Home lives inside the editor surface, so setting
+                        // the same surface is a no-op. Reload explicitly so the
+                        // editor hydrates from the adopted recording.
+                        surface = SURFACE_EDITOR
+                        webView.post { webView.loadUrl(surfaceUrl(SURFACE_EDITOR)) }
+                    }
+                },
+                bringAppToFront = { runOnUiThread { returnToForeground() } },
             ),
         )
     }
@@ -363,6 +473,7 @@ class MainActivity : ComponentActivity() {
                 )
             },
             tokenProvider = { token },
+            requestMicrophonePermission = ::requestMicrophoneAccess,
         )
         bridge = host
         // The capture service outlives page reloads, so it reaches the page
@@ -506,7 +617,7 @@ class MainActivity : ComponentActivity() {
         val message = TextView(this).apply {
             setBackgroundColor(Color.BLACK)
             setTextColor(Color.WHITE)
-            text = "Recordly failed to start.\n\n${error.javaClass.simpleName}: ${error.message}"
+            text = "${getString(R.string.startup_error, getString(R.string.app_name))}\n\n${error.javaClass.simpleName}: ${error.message}"
             setPadding(48, 96, 48, 48)
             textSize = 14f
         }

@@ -1,7 +1,9 @@
 <resources>
-    <string name="app_name">Recordly</string>
-    <string name="telemetry_service_label">Recordly tap tracking</string>
+    <string name="app_name">TapSwoop</string>
+    <string name="telemetry_service_label">TapSwoop tap tracking</string>
     <!-- Shown in the system Accessibility settings list. It must describe what
          the service does, because this is the screen a user decides on. -->
-    <string name="telemetry_service_description">Records where you tap so Recordly can auto-zoom your recordings toward what you touched. Tap positions never leave this device.</string>
+    <string name="telemetry_service_description">Records where you tap so TapSwoop can auto-zoom your recordings toward what you touched. Tap positions never leave this device.</string>
+    <string name="recording_channel_description">Shown while %1$s is recording your screen</string>
+    <string name="startup_error">%1$s failed to start.</string>
 </resources>

@@ -1,8 +1,16 @@
 <resources>
-    <style name="Theme.Recordly" parent="@android:style/Theme.Material.NoActionBar">
-        <item name="android:windowBackground">@android:color/black</item>
+    <!-- Keep these colors in sync with CutRoom.css. -->
+    <color name="cut_room_light_ground">#E7EEF0</color>
+    <color name="cut_room_dark_ground">#182327</color>
+    <style name="Theme.Recordly.System" parent="@android:style/Theme.Material.Light.NoActionBar" />
+    <style name="Theme.Recordly" parent="Theme.Recordly.System">
+        <item name="android:windowBackground">@color/cut_room_ground</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">?android:attr/isLightTheme</item>
+        <item name="android:windowLightNavigationBar">?android:attr/isLightTheme</item>
+        <item name="android:forceDarkAllowed">false</item>
         <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
     </style>
+    <color name="cut_room_ground">@color/cut_room_light_ground</color>
 </resources>

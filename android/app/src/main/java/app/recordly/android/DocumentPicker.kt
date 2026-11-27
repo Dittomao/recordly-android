@@ -56,7 +56,7 @@ object DocumentPicker {
                 return result
             }
             launch = launcher ?: run {
-                result.complete(failure("Recordly is not in the foreground"))
+                result.complete(failure("The app is not in the foreground"))
                 return result
             }
             pending = Request(kind, includeProjects, result)

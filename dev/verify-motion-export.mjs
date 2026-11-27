@@ -7,11 +7,11 @@ import { execFileSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
-import { execOut, forward, shell } from "./adb.mjs";
+import { appProcessId, execOut, forward, shell } from "./adb.mjs";
 
-const pkg = "app.recordly.android.debug";
+const pkg = "app.tapswoop.android.debug";
 assert.match(process.env.RECORDLY_DEVICE || "emulator-5554", /^emulator-/, "Use a test emulator");
-const pid = (await shell(["pidof", pkg])).stdout.trim().split(/\s+/)[0];
+const pid = await appProcessId(pkg);
 assert.ok(pid, "Open Recordly on the test emulator first");
 await forward(9222, `localabstract:webview_devtools_remote_${pid}`);
 const { chromium } = createRequire(import.meta.url)("../recordly-upstream/node_modules/playwright");
@@ -43,7 +43,7 @@ try {
 	const action = page.getByRole("button", { name: "Export Video" });
 	if (!(await action.isVisible())) {
 		if (!(await page.getByRole("row", { name: "Save to device" }).isVisible())) {
-			await page.getByRole("button", { name: "Publish", exact: true }).click();
+			await page.getByRole("button", { name: "Export", exact: true }).click();
 		}
 		const local = page.getByRole("row", { name: "Save to device" });
 		if ((await local.getAttribute("aria-selected")) !== "true") await local.click();

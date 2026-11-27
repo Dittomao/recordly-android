@@ -1,11 +1,11 @@
 /** Inspect and exercise the debug app's WebView through its Android DevTools socket. */
 import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { shell, forward } from './adb.mjs';
+import { appProcessId, forward } from './adb.mjs';
 
 const require = createRequire(import.meta.url);
 const { chromium } = require('../recordly-upstream/node_modules/playwright');
-const processId = (await shell(['pidof', 'app.recordly.android.debug'])).stdout.trim().split(/\s+/)[0];
+const processId = await appProcessId('app.tapswoop.android.debug');
 if (!processId) throw new Error('Recordly debug app is not running');
 await forward(9222, `localabstract:webview_devtools_remote_${processId}`);
 const browser = await chromium.connectOverCDP('http://127.0.0.1:9222');

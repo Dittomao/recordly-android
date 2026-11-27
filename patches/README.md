@@ -8,10 +8,33 @@ The Android build runs the upstream Recordly renderer from
 
 `recordly-android.patch` contains every renderer change this port needs:
 
-- phone shell: dashboard/editor drawers, compact timeline, touch settings
+- Android Cut Room: local library, record/import buttons, full-width preview,
+  labeled timeline, and bottom editing panels that replace the timeline without
+  obscuring the preview; Look opens on frame controls with wallpapers in their
+  own tab, and the frame settings use Bencho's MIT-licensed Wake slider in one
+  column; touch scrubbing, full-stage crop, and Android Back handling for
+  editor overlays; desktop keeps the upstream layout
+- Sileo 0.1.6 recorder surface (MIT, pinned, vendored in
+  `src/components/launch/sileo`): a separate `recorder.html` entry, the real
+  SVG goo filter and spring, and one top-anchored boot-pill entrance that hands
+  off to Sileo at identical geometry. The native window starts at the top and
+  arrives compact; there is no bottom-to-top travel. Tap the pill to expand;
+  20 s of inactivity folds it back. Home and the setup share
+  `src/components/ui/CutRoomRecordButton.tsx`; Home starts the overlay on the
+  press but never expands it. Android hosts the transparent window in
+  `SileoOverlay.kt`; the setup is removed before capture.
+- TapSwoop first-run tour: four Android pages, mandatory Tap focus,
+  microphone and screen-sharing setup with Explore/Start locked until complete,
+  no Skip, live state, theme and reduced-motion support, and replay from Settings
+- Android-only app display name, without changing desktop releases
 - touch auto-zoom scheduling, adaptive depth, and fitted spring timing shared
-  by playback and export
+  by playback and export; separate nearby-in-time taps on distinct targets
+  when they fit, and use the empty Android Zoom lane for scrubbing
 - touch settings surface (no taskbar/updates/shortcuts/account on Android)
+- Android WebView preview: decoded frames copied through a 2D canvas before
+  Pixi upload (this WebView uploads black from `VideoSource`), first-frame
+  refresh at 0:00, a capped playback copy with full-resolution paused frames,
+  and a retrying filmstrip extraction
 - consent-denial handling and the `canceled` result type
 - the earlier thumbnail-capture fixes
 

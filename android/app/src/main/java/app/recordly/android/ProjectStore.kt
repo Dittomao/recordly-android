@@ -174,7 +174,7 @@ class ProjectStore(
         if (existingPath != null && existing == null) {
             return JSONObject().apply {
                 put("success", false)
-                put("message", "Project is outside Recordly's library or no longer exists")
+                put("message", "Project is outside the app's library or no longer exists")
             }
         }
         val id = existing?.let { idOf(it) } ?: newId()
@@ -282,7 +282,7 @@ class ProjectStore(
             return JSONObject().apply {
                 put("success", false)
                 put("path", path)
-                put("message", "Project file not found in Recordly's library")
+                put("message", "Project file not found in the app's library")
             }
         }
         val project = readBody(file) ?: return JSONObject().apply {
@@ -347,7 +347,7 @@ class ProjectStore(
             if (path.isEmpty()) continue
             val file = projectFile(path)
             if (file == null) {
-                errors.put("Project is outside Recordly's library or no longer exists")
+                errors.put("Project is outside the app's library or no longer exists")
                 continue
             }
             selected.add(path to file)
@@ -486,13 +486,13 @@ class ProjectStore(
             null
         }
         if (project == null || project.optJSONObject("editor") == null) {
-            return JSONObject().put("success", false).put("error", "Invalid Recordly project file")
+            return JSONObject().put("success", false).put("error", "Invalid project file")
         }
         // Imports may carry a loopback port from a previous app process.
         rewriteStrings(project) { value -> attachOrigin(value) }
         if (resolveProjectMedia(project.optString("videoPath", "")) == null) {
             return JSONObject().put("success", false).put(
-                "error", "Import this project's source video into Recordly before opening it",
+                "error", "Import this project's source video into the app before opening it",
             )
         }
         val name = displayName.replace(Regex("(?i)\\.(?:recordly\\.json|recordly|openscreen)$"), "")
@@ -707,7 +707,7 @@ class ProjectStore(
             val file = projectFile(paths.optString(index, ""))
                 ?: return JSONObject().apply {
                     put("success", false)
-                    put("error", "A selected project is outside Recordly's library")
+                    put("error", "A selected project is outside the app's library")
                 }
             selected.add(file)
         }

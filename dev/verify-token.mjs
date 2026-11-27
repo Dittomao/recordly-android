@@ -11,14 +11,14 @@
  */
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { forward, shell } from "./adb.mjs";
+import { appProcessId, forward, shell } from "./adb.mjs";
 
-const packageName = "app.recordly.android.debug";
+const packageName = "app.tapswoop.android.debug";
 const STALE = "stale-token-value";
 const require = createRequire(import.meta.url);
 const { chromium } = require("../recordly-upstream/node_modules/playwright");
 
-const pid = (await shell(["pidof", packageName])).stdout.trim().split(/\s+/)[0];
+const pid = await appProcessId(packageName);
 assert.ok(pid, "Start Recordly on the emulator first");
 await forward(9222, `localabstract:webview_devtools_remote_${pid}`);
 const browser = await chromium.connectOverCDP("http://127.0.0.1:9222", { timeout: 10_000 });

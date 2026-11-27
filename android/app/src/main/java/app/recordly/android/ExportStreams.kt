@@ -10,6 +10,8 @@ import org.json.JSONObject
 import java.io.File
 import java.io.InputStream
 import java.io.RandomAccessFile
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -48,7 +50,8 @@ object ExportStreams {
      * High-water mark of the last successful close, keyed by temp path.
      *
      * `finalize` is a separate IPC call, so without this it cannot tell a fully
-     * streamed export from a truncated one. The entry is consumed on finalize.
+     * streamed export from a truncated one. Keep it until finalize succeeds
+     * (or the user discards the temp) so a retry applies the same check.
      */
     private val closedSizes = ConcurrentHashMap<String, Long>()
 
@@ -71,7 +74,7 @@ object ExportStreams {
 
     /** `{success, streamId, tempPath}` — the temp file is created but empty. */
     fun open(extension: String): JSONObject {
-        val context = appContext ?: return failure("Recordly is not running")
+        val context = appContext ?: return failure("The app is not running")
         if (!EXTENSION.matches(extension)) {
             return failure("Invalid export stream extension: $extension")
         }
@@ -154,7 +157,7 @@ object ExportStreams {
 
     /** Deletes a temp file the renderer decided not to save. */
     fun discard(tempPath: String): JSONObject {
-        val context = appContext ?: return failure("Recordly is not running")
+        val context = appContext ?: return failure("The app is not running")
         val file = withinTemp(context, tempPath)
             ?: return failure("Temp path is not an app-managed export temp")
         closedSizes.remove(runCatching { file.canonicalPath }.getOrDefault(file.path))
@@ -163,19 +166,18 @@ object ExportStreams {
     }
 
     /**
-     * Moves a finished temp file to its destination.
+     * Publishes a finished export and moves its temp file to app storage.
      *
      * On desktop `finalize-exported-video` opens a save dialog; Android has no
      * file picker here, so the destination is a unique name in the app's export
      * directory (which the media server exposes, so the editor can play it
-     * back). The file is then copied into MediaStore under
-     * `Movies/Recordly`, which is how it becomes visible to the rest of the
-     * device — the copy is deliberate, because the app's own copy keeps a
-     * stable path for "save again"/reveal while the gallery entry is what the
-     * user actually opens. A failed gallery publish never fails the export.
+     * back). Save to device also requires a visible MediaStore entry. Copy
+     * from the temp file first, keeping it available if MediaStore fails.
+     * The app's own copy keeps the returned path stable for reveal/playback.
      */
+    @Synchronized
     fun finalize(payload: JSONObject, exportsDir: File): JSONObject {
-        val context = appContext ?: return failure("Recordly is not running")
+        val context = appContext ?: return failure("The app is not running")
         val tempRaw = payload.optString("tempPath", "")
         val fileName = payload.optString("fileName", "")
         if (tempRaw.isEmpty() || fileName.isEmpty()) {
@@ -184,9 +186,8 @@ object ExportStreams {
         val temp = withinTemp(context, tempRaw)
             ?: return failure("Temp path is not an app-managed export temp")
         if (!temp.isFile) return failure("Exported video temp file is missing: ${temp.path}")
-        val expectedBytes = closedSizes.remove(
-            runCatching { temp.canonicalPath }.getOrDefault(temp.path),
-        ) ?: 0L
+        val tempKey = temp.path
+        val expectedBytes = closedSizes[tempKey] ?: 0L
         if (temp.length() <= 0L) return failure("The exported video is empty")
         if (expectedBytes > 0L && temp.length() < expectedBytes) {
             return failure("The exported video was truncated (${temp.length()} of $expectedBytes bytes)")
@@ -207,22 +208,27 @@ object ExportStreams {
                 val exportsRoot = exportsDir.canonicalFile
                 val allowed = exportsRoot.path + File.separator
                 if (!target.path.startsWith(allowed)) {
-                    return failure("This build can only save exports into Recordly's export folder")
+                    return failure("This build can only save exports into the app's export folder")
                 }
                 target
             } else {
                 exportsDir.mkdirs()
-                uniqueFile(exportsDir, sanitizeName(fileName))
+                uniqueFile(exportsDir, sanitizeName(context, fileName))
             }
         } catch (error: Throwable) {
             return failure(error.message ?: "Could not resolve the export destination")
         }
 
+        val galleryUri = publishToGallery(context, temp, destination.name)
+            ?: return failure("Android could not save to your gallery. Use Save Again to retry without re-rendering.")
+
         try {
             destination.parentFile?.mkdirs()
-            if (destination.exists()) destination.delete()
-            move(temp, destination)
+            // Both paths live under filesDir. A failed rename must not
+            // consume the source or delete an existing destination.
+            Files.move(temp.toPath(), destination.toPath(), StandardCopyOption.ATOMIC_MOVE)
         } catch (error: Throwable) {
+            removeGalleryEntry(context, galleryUri)
             Log.w(TAG, "cannot move the export into place", error)
             return JSONObject().apply {
                 put("success", false)
@@ -232,8 +238,8 @@ object ExportStreams {
             }
         }
 
+        closedSizes.remove(tempKey)
         val captionError = writeCaptionSidecars(destination, payload.optJSONObject("captionSidecar"))
-        publishToGallery(context, destination)
 
         return JSONObject().apply {
             put("success", true)
@@ -326,29 +332,30 @@ object ExportStreams {
      * API 29+ MediaStore: insert pending, stream the bytes in, then clear the
      * pending flag so no half-written video is ever indexed.
      */
-    private fun publishToGallery(context: Context, file: File) {
-        val isGif = file.name.endsWith(".gif", ignoreCase = true)
+    private fun publishToGallery(context: Context, file: File, displayName: String): Uri? {
+        val isGif = displayName.endsWith(".gif", ignoreCase = true)
+        val album = context.getString(R.string.app_name)
         val collection =
             if (isGif) MediaStore.Images.Media.EXTERNAL_CONTENT_URI
             else MediaStore.Video.Media.EXTERNAL_CONTENT_URI
         val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, file.name)
+            put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
             put(
                 MediaStore.MediaColumns.MIME_TYPE,
                 if (isGif) "image/gif" else "video/mp4",
             )
-            put(MediaStore.MediaColumns.RELATIVE_PATH, if (isGif) "Pictures/Recordly" else "Movies/Recordly")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, if (isGif) "Pictures/$album" else "Movies/$album")
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
         val resolver = context.contentResolver
         val uri: Uri = try {
             resolver.insert(collection, values) ?: run {
                 Log.w(TAG, "MediaStore refused the export entry")
-                return
+                return null
             }
         } catch (error: Throwable) {
             Log.w(TAG, "cannot insert into MediaStore", error)
-            return
+            return null
         }
         try {
             val wrote = resolver.openOutputStream(uri)?.use { output ->
@@ -356,18 +363,18 @@ object ExportStreams {
             } != null
             if (!wrote) throw IllegalStateException("MediaStore stream unavailable")
             val ready = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
-            resolver.update(uri, ready, null, null)
+            check(resolver.update(uri, ready, null, null) == 1) { "MediaStore did not publish the export entry" }
+            return uri
         } catch (error: Throwable) {
             Log.w(TAG, "cannot publish the export to the gallery", error)
-            runCatching { resolver.delete(uri, null, null) }
+            removeGalleryEntry(context, uri)
+            return null
         }
     }
 
-    /** Moves across filesystems if the rename is refused. */
-    private fun move(source: File, target: File) {
-        if (source.renameTo(target)) return
-        source.copyTo(target, overwrite = true)
-        if (!source.delete()) Log.w(TAG, "cannot remove the export temp after moving it")
+    private fun removeGalleryEntry(context: Context, uri: Uri) {
+        runCatching { context.contentResolver.delete(uri, null, null) }
+            .onFailure { Log.w(TAG, "cannot remove an unfinished gallery export", it) }
     }
 
     /** A canonical file inside the temp directory, or null. */
@@ -386,9 +393,9 @@ object ExportStreams {
         return if (candidate.path.startsWith(prefix)) candidate else null
     }
 
-    private fun sanitizeName(fileName: String): String {
+    private fun sanitizeName(context: Context, fileName: String): String {
         val cleaned = fileName.replace(ILLEGAL_NAME_CHARS, "").trim()
-        return if (cleaned.isEmpty()) "Recordly export.mp4" else cleaned
+        return cleaned.ifEmpty { "${context.getString(R.string.app_name)} export.mp4" }
     }
 
     private fun uniqueFile(dir: File, fileName: String): File {

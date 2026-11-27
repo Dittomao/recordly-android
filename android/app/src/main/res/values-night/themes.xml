@@ -1,0 +1,4 @@
+<resources>
+    <style name="Theme.Recordly.System" parent="@android:style/Theme.Material.NoActionBar" />
+    <color name="cut_room_ground">@color/cut_room_dark_ground</color>
+</resources>

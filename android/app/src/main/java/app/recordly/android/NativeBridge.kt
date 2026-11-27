@@ -14,6 +14,7 @@ import org.json.JSONObject
 import org.json.JSONTokener
 import java.io.File
 import java.security.MessageDigest
+import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -47,6 +48,12 @@ class NativeBridge(
     private val onEmit: (channel: String, payloadJson: String) -> Unit,
     /** Shared secret for protected loopback routes; empty outside the app host. */
     private val tokenProvider: () -> String = { "" },
+    /**
+     * Shows the Android microphone prompt from the foreground activity.
+     * The returned future completes with the system answer.
+     */
+    private val requestMicrophonePermission: () -> CompletableFuture<Boolean> =
+        { CompletableFuture.completedFuture(false) },
 ) {
     private val appContext: Context = context.applicationContext
     private val settings = SettingsStore(context)
@@ -507,7 +514,7 @@ class NativeBridge(
             put("success", false)
             put("canceled", true)
             put("path", recordingsDir.path)
-            put("message", "Recordings are stored inside Recordly on Android.")
+            put("message", "Recordings are stored inside the app on Android.")
         }
 
         // The renderer shows its permission banner when this event arrives. The
@@ -633,10 +640,8 @@ class NativeBridge(
         "deleteRecordingFile" -> deleteRecording(args.optString(0, ""))
 
         // --- appending a recording to the open timeline ------------------ //
-        // Upstream rewrites both sources with ffmpeg and concatenates them.
-        // Both sides here were encoded by this app, so the same operation is a
-        // sample-level remux: copy both MP4 sample streams into one container,
-        // shifting the second by the first's duration. See [RecordingImport].
+        // Keep the sample-copy path for compatible recordings and transcode
+        // incompatible inputs into one continuous source. See [RecordingImport].
 
         "importRecording" -> importRecording(
             currentRaw = args.optString(0, ""),
@@ -702,7 +707,7 @@ class NativeBridge(
                     put("success", opened)
                     // Two causes share this answer: nothing claims the type,
                     // or the file is outside what the FileProvider shares.
-                    if (!opened) put("error", "This file cannot be opened from Recordly")
+                    if (!opened) put("error", "This file cannot be opened from the app")
                 }
             }
         }
@@ -713,13 +718,13 @@ class NativeBridge(
         "openRecordingsFolder" -> JSONObject().apply {
             put("success", false)
             put("path", recordingsDir.path)
-            put("message", "Recordly keeps recordings inside the app on Android; open them from the library.")
+            put("message", "Recordings stay inside the app on Android; open them from the library.")
         }
 
         "openProjectsDirectory" -> JSONObject().apply {
             put("success", false)
             put("path", projects.rootPath())
-            put("message", "Recordly keeps projects inside the app on Android.")
+            put("message", "Projects stay inside the app on Android.")
         }
 
         // Bytes for the editor's asset pipeline. Like the wallpaper thumbnail,
@@ -732,7 +737,7 @@ class NativeBridge(
             JSONObject().apply {
                 put("success", url != null)
                 put("url", url ?: JSONObject.NULL)
-                if (url == null) put("error", "File is outside Recordly's approved locations")
+                if (url == null) put("error", "File is outside the app's approved locations")
             }
         }
 
@@ -814,7 +819,7 @@ class NativeBridge(
             val clipboard = appContext.getSystemService(android.content.ClipboardManager::class.java)
             runCatching {
                 clipboard?.setPrimaryClip(
-                    android.content.ClipData.newPlainText("Recordly", args.optString(0, "")),
+                    android.content.ClipData.newPlainText(appContext.getString(R.string.app_name), args.optString(0, "")),
                 )
             }.onFailure { Log.w(TAG, "cannot write to the clipboard", it) }
             null
@@ -948,23 +953,22 @@ class NativeBridge(
 
         "requestMediaPermission" -> {
             // The argument is a device name ("microphone" | "camera"), not an
-            // Android permission. Prompting needs a foreground activity; the
-            // microphone is requested when a take starts, and the camera is
-            // not used by this host, so this reports the standing grant.
-            val permission = when (args.optString(0, "")) {
-                "microphone" -> Manifest.permission.RECORD_AUDIO
-                "camera" -> Manifest.permission.CAMERA
-                else -> null
-            }
-            if (permission == null) {
-                JSONObject().apply {
+            // Android permission. The onboarding setup asks for the microphone
+            // here; a take would otherwise defer the same prompt to capture.
+            when (args.optString(0, "")) {
+                "microphone" -> requestMicrophonePermission().thenApply { granted ->
+                    JSONObject().apply {
+                        put("success", true)
+                        put("granted", granted)
+                    }
+                }
+                "camera" -> JSONObject().apply {
+                    put("success", true)
+                    put("granted", permissionState(Manifest.permission.CAMERA) == "granted")
+                }
+                else -> JSONObject().apply {
                     put("success", false)
                     put("error", "Invalid media permission device")
-                }
-            } else {
-                JSONObject().apply {
-                    put("success", true)
-                    put("granted", permissionState(permission) == "granted")
                 }
             }
         }
@@ -1077,7 +1081,20 @@ class NativeBridge(
         // the one WebView, chosen by reload.
 
         "showRecordingHud" -> {
-            CaptureSession.showHud()
+            if (!SileoOverlay.show(appContext, baseUrl())) {
+                SileoOverlay.openPermissionSettings(appContext)
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    android.widget.Toast.makeText(
+                        appContext,
+                        "Allow TapSwoop to display over other apps to use the floating recorder. " +
+                            "Showing the standard recorder for now.",
+                        android.widget.Toast.LENGTH_LONG,
+                    ).show()
+                }
+                // Recording must stay possible even when the overlay permission
+                // is refused or not yet granted.
+                CaptureSession.showHud()
+            }
             JSONObject().put("success", true)
         }
 
@@ -1468,7 +1485,7 @@ class NativeBridge(
             importCancelled = false
 
             val result = try {
-                RecordingImport.combine(current, recording, output) { importCancelled }
+                RecordingImport.combine(appContext, current, recording, output) { importCancelled }
             } catch (error: RecordingImport.Failure) {
                 discardImportOutput(output)
                 return failure(error.message ?: "Could not combine the recordings")

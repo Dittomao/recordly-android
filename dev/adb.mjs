@@ -86,6 +86,22 @@ async function transport() {
     } catch (error) { connection.close(); throw error; }
 }
 
+/**
+ * Resolve the app's own process by exact process name.
+ *
+ * `pidof <package>` also matches helper processes whose command line carries
+ * the package (media.swcodec does on OnePlus), which sends verifiers to a
+ * WebView socket that does not exist.
+ */
+export async function appProcessId(packageName) {
+    const result = await shell(['ps', '-A', '-o', 'PID,NAME']);
+    for (const line of result.stdout.split(/\r?\n/)) {
+        const [pid, name] = line.trim().split(/\s+/);
+        if (name === packageName) return pid;
+    }
+    return '';
+}
+
 export async function shell(args) {
     const connection = await transport();
     const stdout = [], stderr = [];

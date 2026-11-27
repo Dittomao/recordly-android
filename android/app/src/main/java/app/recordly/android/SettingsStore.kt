@@ -35,6 +35,12 @@ class SettingsStore(context: Context) {
     /** Raw JSON for a key, or `null` when absent. Used by the sync transport. */
     fun getJson(key: String): String? = prefs.getString(key, null)
 
+    fun registerListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) =
+        prefs.registerOnSharedPreferenceChangeListener(listener)
+
+    fun unregisterListener(listener: SharedPreferences.OnSharedPreferenceChangeListener) =
+        prefs.unregisterOnSharedPreferenceChangeListener(listener)
+
     private fun encode(value: Any?): String = when (value) {
         null -> "null"
         is JSONObject, is JSONArray -> value.toString()
@@ -51,6 +57,8 @@ class SettingsStore(context: Context) {
     }
 
     companion object {
+        const val PREF_THEME = "recordly.theme"
+
         /**
          * "Hide recording controls from captured video"
          * (`get-`/`set-hud-overlay-capture-protection`).

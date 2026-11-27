@@ -1,14 +1,22 @@
-# Recordly for Android
+# TapSwoop for Android
 
 This project hosts the upstream Recordly React renderer in an Android WebView.
 Kotlin provides the `window.electronAPI` bridge, a local media server, screen
-capture, project storage, and export. Two small renderer changes handle
-thumbnail capture on Android; the rest follows upstream.
+capture, project storage, and export. The Android-only Cut Room layout reuses
+the upstream playback, timeline editing, and export logic.
+
+TapSwoop uses `app.tapswoop.android` (debug: `app.tapswoop.android.debug`).
+Old APKs under `app.recordly.android` are separate installs; they retain their
+private data. Project formats and bridge contracts are unchanged. Existing
+public exports are not moved. The Kotlin namespace stays `app.recordly.android`.
+The Android renderer reads `app_name`; desktop builds keep the upstream name.
 
 ## Build
 
 Requirements: Android Studio with its bundled JDK 21, Android SDK platform 35,
 and Node.js 20 or newer. Set Gradle JDK to Android Studio's bundled JDK.
+On first setup, run the APK build once without `-Offline` to download AndroidX
+Media3 and the other Gradle dependencies.
 
 ```sh
 node scripts/build-renderer.mjs
@@ -37,21 +45,35 @@ treating the API level as the gate.
 
 ## Implemented
 
-- Editor boot and local video playback.
+- Cut Room Home and Editor on Android. Home puts the approved Record and
+  Import buttons above a searchable Projects/Recordings library. Editor uses
+  the upstream preview and timeline, with labeled tracks and a bottom rail
+  for Trim, Zoom, Look, Audio and Clips. The same capture, editing and
+  export commands sit behind the new controls.
 - MediaProjection screen capture with foreground service, pause, resume, and
   stop, plus AAC microphone audio. An API 37 emulator recording was verified
   through notification pause, resume, stop, and editor handoff. The recorder
   now actually leaves the foreground on every take (`moveTaskToBack(false)`);
   the old non-root call was a no-op on a cold start and recorded the HUD.
 - Accessibility touch telemetry is wired into capture and can supply cursor
-  samples when the user enables the service in Android settings.
+  samples when the user enables the service in Android settings. Play Store
+  bottom navigation and Chrome's overflow button have narrow fallbacks for
+  controls that report selection or popup opening instead of a click. On the
+  tested OxygenOS Home, a direct launch can use the actual dock bounds of
+  Play Store or Chrome when the launcher does not emit a click, including
+  cold launches that display a splash screen. A Nord 5 take verified both
+  dock icons, both Play Store tabs, and the Chrome menu without adding a zoom
+  for a swipe or Recents return. The service only inspects controls during
+  active capture and does not record their text.
 - Taps are presented as a touch indicator, never a mouse cursor. A tap at
   `(cx, cy)` renders blue concentric rings and no cursor sprite, in preview and
   export alike.
-- Auto-zoom is tuned for touch: every tap gets its own zoom in/out (clicks less
-  than 800 ms apart merge), starting 200 ms before the tap with a depth chosen so
-  edge targets are reachable; swipes and notification/SystemUI controls produce
-  none, and auto-apply no longer depends on a visible preview canvas.
+- Auto-zoom uses reported accessibility taps: each scheduled visit starts
+  200 ms before the press and uses adaptive depth. Repeats in the same area
+  can share a visit; different targets get separate visits when both fit.
+  Swipes and notification/SystemUI controls produce no zoom, and a tap too
+  late to fit cannot erase an earlier visit. Auto-apply does not depend on a
+  visible preview canvas.
 - Spaced taps return to the wide frame between visits. Short blocks fit the
   shared spring to the available time instead of running competing ramps. Touch
   rings fade in 420 ms and light blur follows fast camera movement. See
@@ -60,11 +82,92 @@ treating the API level as the gate.
   overflow to the left and clip the Record button (449 px bar on a 411 px
   viewport, Record at x = -24). The Android host adapter caps the bar and makes
   it scroll, keeping Record visible.
-- Phone-first editor shell. The desktop column layout gave the preview 19 px of
-  a 411 px row; it now keeps the full width beside a 64 px tool rail while the
-  inspector is a closed-by-default slide-over drawer with a close button and
-  backdrop. The header respects the status bar and drops desktop-only chrome;
-  the app is locked to portrait.
+- Floating recording setup: **New recording** opens the actual **Sileo 0.1.6**
+  component (vendored MIT, pinned commit) in a small transparent WebView
+  overlay once **Display over other apps** is granted. It is not a native
+  drawing of Sileo: the SVG goo filter, 600 ms spring, header morph and content
+  fade are upstream. The native window is placed at the top from its first
+  frame; it never flies in from the bottom. A static Sileo-shaped pill performs
+  the **only** entrance, a top-anchored Dynamic Island pop, then hands off to
+  the real Sileo pill in the same frame at identical geometry. It arrives
+  **compact**: tapping the 40 px pill opens the body on the recorder's
+  critically damped Sileo spring (`bounce: 0`, so it expands once and stops).
+  The body fill is opaque from the first pixel; only its height animates, so
+  the Home behind cannot ghost through the card while it grows. 20 s without
+  pointer or keyboard activity folds it back. The native window is only
+  as large as the compact pill (380×128 px at 360 dp), so taps beside it reach
+  the app. The WebView itself is laid out at the expanded body width from the
+  start; the compact window is a centre crop of that fixed page. Tapping widens
+  the window and uncovers the controls instead of reflowing the pill, so the
+  header cannot move when it is opened. The setup uses the same **Record**
+  control as Home, with **Mic** and **Screen**. Home's press starts the overlay
+  while its own reveal is still running, but the press itself never expands the
+  pill. A tap outside folds it
+  without consuming the app's tap (`FLAG_WATCH_OUTSIDE_TOUCH`); system **Back**
+  or **Cancel** dismisses it. The setup exists only after Home's **New
+  recording** is pressed; leaving TapSwoop dismisses it, so a fresh launch
+  never shows a leftover setup. Apps that hide non-system overlays, such as
+  Settings, can hide it while they are in front.
+  Start removes the overlay before Android's screen-sharing consent, so the
+  captured frames are clean. The foreground notification owns **Pause** and
+  **Stop**; a stopped take opens in the editor natively. Without overlay
+  permission the existing HUD is used, with a short explanation.
+  The overlay is **not** kept on screen during capture: a visible `FLAG_SECURE`
+  overlay left a black pill-shaped cutout in the raw MP4 on the API 37
+  emulator, and an ordinary overlay is recorded. Removing it before the first
+  frame is the only verified way to keep both the setup usable and the footage
+  clean. Camera capture is not implemented, so the setup has no camera toggle.
+  The overlay WebView's page exposes real buttons and labels, but TalkBack
+  traversal of that page has not been validated on a device.
+- The portrait editor gives the preview the full width above the timeline.
+  Decoded frames are copied through a 2D canvas before Pixi upload on Android
+  (this WebView returns black for a Pixi `VideoSource`); playback copies are
+  capped at 960 px, and paused frames return to full resolution. The preview
+  refreshes its first frame after a cold start, and filmstrip extraction
+  retries once on a slow decoder.
+  Editing panels temporarily replace the timeline and its action strip. The
+  preview and playback controls stay visible and usable without a dimming layer.
+  Close, Android Back, or a different tool returns to the timeline or switches
+  panels; the timeline stays mounted so its scroll position is preserved.
+  Look opens on Frame. The frame settings use the Bencho Wake slider in one
+  column: Padding and Corner radius first, then Shadow and Blur. Each row
+  shows its current value; the bars rise with drag speed and settle back.
+  Wallpapers have their own Background tab. All five Look tabs fit at 360 px
+  and wider, and the panel fades at the bottom when more settings are below.
+  Tapping the empty Zoom lane scrubs; **Zoom → Add zoom** creates a manual block.
+  Dragging the playhead or ruler seeks with a finger. The playhead preserves
+  where it was grabbed, tracks once per display frame (even over a cut), and
+  commits the release position. The track area remains available for vertical
+  scrolling and clip gestures. **Split here** is disabled at clip boundaries.
+  Crop uses the full editing area and retains usable controls at short heights.
+  Back, rename, and Export share a single 44 px editor header. The compact
+  Export label leaves room for the project name while keeping its touch target.
+  Aspect ratio and Crop sit at the start of the preview toolbar.
+  Android Back closes the current crop, aspect,
+  rename or export overlay before leaving the editor. A completed export
+  offers **Open export**.
+  The ruler keeps its labels below the playhead timestamp and omits the
+  desktop hover guide. Zoom blocks show a complete icon or depth only when
+  they fit. The phone's aspect picker fits the standard presets without
+  initial scrolling and preserves the shapes' proportions. Export places
+  its only destination in a compact row without altering the export defaults.
+  The native status and navigation bars match the app theme while their insets
+  keep controls in the safe area. This is app chrome, not a change to how
+  Android captures System UI. The header drops desktop-only chrome.
+- Settings opens over the current library or editor without replacing it.
+  The library drawer and Settings use short transform/opacity transitions
+  without background blur. Reduced motion removes translation; Android Back
+  dismisses the active sheet or drawer before leaving the app.
+- First-run onboarding replaces the desktop account/sign-in tour on Android.
+  Four pages show recording, tap focus, the Cut Room and a required setup
+  checklist. **Start recording** stays disabled until Tap focus is on and the
+  microphone is allowed; the microphone prompt is shown from the tour, and
+  screen sharing is confirmed in the tour and still requested by Android on
+  every take. Both **Explore library** and **Start recording** stay disabled
+  until all three rows are complete; the tour has no Skip and system Back or
+  Escape cannot dismiss it. It stores completion in app settings, uses the same
+  light and dark Cut Room palette, and can be replayed from
+  **Settings → Dev → Take the tour**.
 - Phone-first dashboard. The 192 px navigation column became a drawer opened
   from the header, leaving the project card the full viewport width.
 - Settings persistence; cursor telemetry sidecar read/write.
@@ -88,26 +191,45 @@ treating the API level as the gate.
   are copied into app storage. Project import works when its source video is
   already in Recordly's app storage.
 - Recording library listing (`listRecordings`) for the editor's Clips panel.
-- Appending a recording to the open timeline (`importRecording`): a
-  sample-level MP4 concat with the second file shifted by the first's duration,
-  plus one merged cursor-telemetry sidecar. No ffmpeg and no re-encode.
-  Requires matching resolution and codec settings; mismatches are refused with
-  a readable error rather than producing a corrupt file.
+- Appending a recording to the open timeline (`importRecording`): compatible
+  clips use a lossless MP4 sample copy. For mixed formats, AndroidX Media3
+  encodes a new H.264/AAC source on-device at the first clip's frame size.
+  Other aspect ratios are centered without stretching or cropping. Clip audio
+  and tap telemetry follow the join, and the source files are unchanged.
 - Video wallpapers chosen through the page's own `<input type="file">`
   (`WebChromeClient.onShowFileChooser` → `importWallpaperVideo`). The `File`
   is uploaded over the export byte channel and stored under
   `media/imported-wallpapers/`.
 - Raw byte export stream, `readLocalFile` byte hydration, and saving an export
-  to `Movies/Recordly` + MediaStore.
+  to `Movies/TapSwoop` (or `Pictures/TapSwoop` for GIFs) via MediaStore.
+  A gallery save failure keeps the rendered temp so **Save Again** can retry
+  without encoding a second time.
 - Project previews enumerate every media reference in the document (video,
   webcam, audio, video wallpaper), so library cleanup does not treat a project
   as having no dependencies.
 
 ## Open work
 
-- Real-device checks of microphone level and capture synchronization.
-- Appending recordings with different resolutions or encoder settings needs a
-  re-encode path; today it fails with an explicit error.
+- Floating pause/stop controls **during** capture. The Sileo setup is removed
+  before the first frame because a `FLAG_SECURE` overlay left a black cutout in
+  the emulator's raw MP4 and an ordinary overlay is recorded. Re-enable only
+  after a device comparison proves secure layers are omitted cleanly, or offer
+  single-app capture.
+- Camera capture. The setup deliberately has no camera toggle until the
+  native encoder can composite a front camera into the take.
+- Real-device checks of the Sileo setup, the centre-to-top entrance, outside
+  tap, permission flow, notification handoff, microphone level and capture
+  synchronization.
+- TalkBack traversal of the overlay WebView. The page uses real buttons and
+  labels; only the WebView node was observed in UIAutomator so far.
+- Sensitive screens that hide non-system overlays (Settings is one) hide the
+  setup while they are in front. A heads-up notification can cover it briefly.
+  This is Android overlay policy, not a capture or renderer failure.
+- Real-device preview smoothness after the canvas-copy fix; the API 37
+  emulator is decoder-bound on a 576×1280 60 fps source even though paused
+  frames are full resolution.
+- Mixed-format append can be slower than sample copy and requires device
+  support for decoding both sources and encoding the project's frame size.
 - Import scratch files under `recordings/.recordly-media/` (and imported
   wallpapers) are never swept. Upstream leaves its normalized copies too, but
   a long-lived install will accumulate them.
@@ -132,12 +254,77 @@ treating the API level as the gate.
 - Tap-based auto-zoom uses `AccessibilityService`, not an accessibility tool
   for disability support. If shipped, it needs a
   [Play declaration, listing disclosure, prominent in-app disclosure and affirmative consent](https://support.google.com/googleplay/android-developer/answer/10964491).
-  Keep recording and manual zoom usable without enabling the service.
+  The current first-run tour requires Tap focus, the microphone and a
+  screen-sharing acknowledgment before **Explore library** or **Start
+  recording** unlock, and it has no Skip. That is stricter than the earlier
+  guidance to keep recording and manual zoom usable without the service.
+  Resolve this against Play's accessibility policy and the required
+  declaration/disclosure before submission; do not ship the current gate
+  without that review.
 - Play distribution does not grant additional capture privileges. Do not
   advertise status-bar or notification-shade support until validated on devices
   with privacy settings unchanged. See the [Nord 5 comparison procedure](../docs/MOTION-PARITY.md#next-systemui-capture-check).
 
 ## Verification
+
+The Cut Room debug APK was built and installed on the API 37 emulator. APK
+metadata reports `TapSwoop` and `app.tapswoop.android.debug`. On the new package,
+the microphone verifier passed fresh capture consent, notification pause/resume
+and stop, and editor handoff. The resulting MP4's audio and video tracks ended
+5 ms apart; AAC averaged about 119 kb/s. This checks track-end skew, not
+physical-device microphone sync.
+
+The old and new debug packages were installed side by side. Home's
+**New recording** opened the native recording HUD, and the HUD's **Home**
+returned to Cut Room. The four-tap auto-zoom take exported through the new
+**Export → Save to device** control and appeared in `Movies/TapSwoop/`.
+Home's **Import** reopened that MP4 through the Android document picker and
+loaded the preview from a byte-identical copy in app storage.
+See [Motion parity](../docs/MOTION-PARITY.md#cut-room-regression-check).
+
+`node dev/verify-cut-room-ui.mjs` exercises the packaged renderer at 360, 390,
+and 430 px with fixture media and a test bridge for library data and pickers.
+The capture and export verifiers below exercise the actual Android host.
+`node dev/verify-onboarding-ui.mjs` covers the TapSwoop tour at the same
+widths: all four pages, required microphone, Tap focus and screen-sharing
+gating, the disabled Explore/Start actions, no Skip or Escape dismissal,
+completion, one-time persistence, Settings replay, Back, dark mode and reduced
+motion.
+
+On the API 37 emulator the real APK opened the tour after install. Android Back
+on page 1 left the tour open; on later pages it moved one page back. The
+microphone row opened Android's real prompt; allowing it changed the row to
+**Allowed**. Enabling the accessibility service changed Tap focus to **On**.
+**Start recording** and **Explore library** remained disabled until the
+screen-sharing row was confirmed; then Start handed off to the native recording
+HUD. The Nord 5 also showed the tour on install; it
+is left on page 1 with completion reset, so the next launch presents it. The
+font scale 1.3 layout was checked on the emulator and restored to 1.0.
+
+### Editor preview and filmstrip (2026-11-23)
+
+Playwright screenshots omit the WebView's WebGL layer; preview evidence must
+come from `adb screencap`. On the API 37 emulator the paused editor showed the
+first frame at 0:00, the frame at 4.1 s after playback, and four filmstrip
+thumbnails. That build exported the open project as 576×1280 H.264 at a
+constant 60 fps (932 frames, 0.0007 ms maximum frame-interval error).
+
+Three Android-specific behaviours were fixed:
+
+- Pixi's `VideoSource` uploads black frames in this WebView. The preview now
+  copies each decoded frame through a 2D canvas before creating the texture.
+  The copy is capped at 960 px on the long edge while frames advance, and
+  returns to the full source resolution when paused.
+- A cold WebView can report `HAVE_ENOUGH_DATA` at t=0 without presenting a
+  frame, which left the preview transparent until the first Play. The
+  transport seeks 1 ms inside the first frame once (`loadeddata`/`canplay`,
+  with retries while the initial seek settles).
+- Filmstrip extraction waits up to 20 s per decode and retries once before the
+  clip falls back to its color; the earlier 8 s timeout could leave a flat
+  clip on the emulator.
+
+`previewFrameTexture.test.ts` covers the Android canvas path, stable texture
+reuse, and the playback cap with full-resolution paused frames.
 
 `node --test bridge/bridge.test.mjs bridge/android.test.mjs` runs 9 tests:
 export byte transport, whole-buffer saves, upload abort, wallpaper upload,
@@ -153,14 +340,24 @@ URLs persist without the loopback token and are re-authorized on load.
 pause/resume/stop path and checks the editor opens it. `node dev/verify-telemetry.mjs`
 enables the accessibility service, records a take while tapping real Settings
 rows, and asserts the sidecar contains normalized click/mouseup pairs.
+`node dev/verify-capture.mjs --interrupt` checks a system-revoked take opens in
+the editor and the Record button stays on-screen for a fresh, separate take.
+`node dev/verify-export-save.mjs` verifies retry after an induced save failure:
+the rendered bytes survive, and the retry produces one visible gallery copy.
+`node dev/verify-mixed-append.mjs` passed on the API 37 emulator: landscape
+640×360 appended to portrait 360×640 without cropping, two same-size H.264
+clips with different profiles joined, and audio after a silent clip was
+preserved. The mixed cases joined at 2,000 ms; the compatible path reproduced
+all input frame hashes. The test also checks the shifted tap coordinates and
+that input files remain byte-for-byte unchanged.
 `node dev/verify-autozoom.mjs` records four Clock keypad taps and one swipe,
 then asserts four fitted zoom regions matching the tap targets, a 200 ms lead,
 adaptive depth, a wide beat between regions, and no region for the swipe.
 `node dev/webview.mjs eval dev/check-codecs.js` reports WebCodecs encoder
 support for the installed WebView.
 
-All five emulator verifiers pass. `dev/verification/` holds their artifacts.
-The touch policy also has unit coverage:
+`dev/verification/` holds the verification artifacts. The touch policy also
+has unit coverage:
 `cd recordly-upstream && ./node_modules/.bin/vitest run src/components/video-editor/touchZoomPolicy.test.ts`.
 `cd recordly-upstream && ./node_modules/.bin/tsc --noEmit` is clean. A denied
 MediaProjection dialog now resolves `canceled:true`, stops without a browser

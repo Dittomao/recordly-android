@@ -1,5 +1,6 @@
 package app.recordly.android
 
+import android.content.Context
 import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
@@ -11,34 +12,19 @@ import org.json.JSONObject
 import org.json.JSONTokener
 import java.io.File
 import java.nio.ByteBuffer
+import kotlin.math.roundToInt
 
 /**
- * Appends one recording to another without re-encoding.
- *
- * Upstream's `import-recording` normalizes both sides with ffmpeg and then
- * concatenates them. Android has no ffmpeg, but it does not need one for the
- * case this feature is actually used in: adding a recording made by this app to
- * a timeline whose source was also made by this app. Both files already share
- * an encoder configuration, so the MP4 samples can be copied straight into a
- * new container with the second file's timestamps shifted by the first file's
- * duration.
+ * Appends one recording to another. Compatible inputs take the lossless
+ * MP4 sample-copy path; mixed formats are decoded and encoded into one track.
  *
  * The result is one immutable source, as upstream describes: the editor and the
  * exporter both read this file, and clip regions address the appended half from
  * `sourceStartMs` onwards. Cursor telemetry from both halves is merged into one
  * sidecar so auto-zoom survives the append.
  *
- * What this deliberately refuses:
- *  - A resolution, codec or codec-configuration mismatch. Concatenating those
- *    at the sample level produces a file that decodes as garbage after the
- *    join; a clear error is better than a corrupt export.
- *  - A recording whose duration cannot be read, because the join point would
- *    be a guess.
- *
- * The sample copy assumes presentation order. Our captures are encoded with
- * `max-b-frames = 0`, so they satisfy that; an imported file that reorders
- * frames is not detected and is not the intended input. Upstream's normalize
- * step is what would have handled it.
+ * Re-encoding keeps the first clip's display size. Other aspect ratios are
+ * fitted, never stretched or cropped. Both paths leave the originals intact.
  */
 internal object RecordingImport {
 
@@ -54,6 +40,9 @@ internal object RecordingImport {
 
     class Failure(message: String) : Exception(message)
 
+    /** Sample order or boundaries made the otherwise compatible remux unsafe. */
+    private class NeedsTranscode : Exception()
+
     /**
      * Concatenates [current] and [recording] into a new file.
      *
@@ -61,6 +50,7 @@ internal object RecordingImport {
      * deleting [output] when this throws.
      */
     fun combine(
+        context: Context,
         current: File,
         recording: File,
         output: File,
@@ -76,58 +66,81 @@ internal object RecordingImport {
             throw error
         }
         try {
-            requireCompatible(first, second)
-
             if (first.durationMs <= 0L || second.durationMs <= 0L) {
                 throw Failure("One of the recordings has no readable duration")
             }
-            val sourceStartMs = first.durationMs
-            val durationMs = second.durationMs
-            val offsetUs = sourceStartMs * 1000L
             output.parentFile?.mkdirs()
-            if (output.exists() && !output.delete()) {
-                throw Failure("Could not replace the previous import file")
+            clearOutput(output)
+            val remuxed = if (canRemux(first, second)) {
+                try {
+                    remux(first, second, output, isCancelled)
+                    true
+                } catch (_: NeedsTranscode) {
+                    clearOutput(output)
+                    false
+                }
+            } else {
+                false
             }
 
-            val muxer = MediaMuxer(output.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-            var started = false
-            try {
-                val videoTrack = muxer.addTrack(first.videoFormat)
-                // Either side may carry microphone audio. One AAC configuration
-                // serves both because the check above proved they agree.
-                val audioFormat = first.audioFormat ?: second.audioFormat
-                val audioTrack = audioFormat?.let { muxer.addTrack(it) }
-                muxer.start()
-                started = true
-
-                writeInput(
-                    input = first,
-                    muxer = muxer,
-                    videoTrack = videoTrack,
-                    audioTrack = audioTrack,
-                    offsetUs = 0L,
-                    isCancelled = isCancelled,
+            val result: Result
+            val firstFit: FrameFit
+            val secondFit: FrameFit
+            if (remuxed) {
+                result = Result(output, first.durationMs, second.durationMs, first.durationMs + second.durationMs)
+                firstFit = FrameFit.IDENTITY
+                secondFit = FrameFit.IDENTITY
+            } else {
+                val canvas = first.displaySize.even()
+                val hasAudio = first.audioTrack != null || second.audioTrack != null
+                val sourceStartMs = RecordingTranscoder.append(
+                    context, current, recording, output, canvas.width, canvas.height, hasAudio, isCancelled,
                 )
-                writeInput(
-                    input = second,
-                    muxer = muxer,
-                    videoTrack = videoTrack,
-                    audioTrack = audioTrack,
-                    offsetUs = offsetUs,
-                    isCancelled = isCancelled,
-                )
-                muxer.stop()
-                started = false
-            } finally {
-                if (started) runCatching { muxer.stop() }
-                runCatching { muxer.release() }
+                val converted = Input.open(output)
+                val totalMs = try {
+                    if (converted.displaySize != canvas || (hasAudio && converted.audioTrack == null)) {
+                        throw Failure("The converted recordings did not preserve the project size or audio")
+                    }
+                    converted.durationMs
+                } finally {
+                    converted.close()
+                }
+                if (sourceStartMs <= 0L || totalMs <= sourceStartMs) {
+                    throw Failure("The converted recordings did not produce a complete timeline")
+                }
+                result = Result(output, sourceStartMs, totalMs - sourceStartMs, totalMs)
+                firstFit = FrameFit.forCanvas(first.displaySize, canvas)
+                secondFit = FrameFit.forCanvas(second.displaySize, canvas)
             }
-
-            writeSidecar(current, recording, output, sourceStartMs)
-            return Result(output, sourceStartMs, durationMs, sourceStartMs + durationMs)
+            if (isCancelled()) throw Failure("Import cancelled")
+            writeSidecar(current, recording, output, result.sourceStartMs, firstFit, secondFit)
+            return result
         } finally {
             first.close()
             second.close()
+        }
+    }
+
+    private fun clearOutput(output: File) {
+        if (output.exists() && !output.delete()) throw Failure("Could not replace the temporary import file")
+    }
+
+    private fun remux(first: Input, second: Input, output: File, isCancelled: () -> Boolean) {
+        val muxer = MediaMuxer(output.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        var started = false
+        try {
+            muxer.setOrientationHint(first.rotationDegrees)
+            val videoTrack = muxer.addTrack(first.videoFormat)
+            val audioTrack = first.audioFormat?.let { muxer.addTrack(it) }
+            muxer.start()
+            started = true
+            writeInput(first, muxer, videoTrack, audioTrack, 0L, isCancelled)
+            writeInput(second, muxer, videoTrack, audioTrack, first.durationMs * 1000L, isCancelled)
+            muxer.stop()
+            started = false
+        } finally {
+            if (started) runCatching { muxer.stop() }
+            runCatching { muxer.release() }
         }
     }
 
@@ -135,40 +148,31 @@ internal object RecordingImport {
     // Compatibility
     // ------------------------------------------------------------------ //
 
-    private fun requireCompatible(first: Input, second: Input) {
+    private fun canRemux(first: Input, second: Input): Boolean {
         val a = first.videoFormat
         val b = second.videoFormat
-        if (mimeOf(a) != mimeOf(b)) {
-            throw Failure("Recordings use different video codecs and cannot be combined on Android")
-        }
-        val width = formatInt(a, MediaFormat.KEY_WIDTH)
-        val height = formatInt(a, MediaFormat.KEY_HEIGHT)
-        val otherWidth = formatInt(b, MediaFormat.KEY_WIDTH)
-        val otherHeight = formatInt(b, MediaFormat.KEY_HEIGHT)
-        if (width != otherWidth || height != otherHeight) {
-            throw Failure(
-                "Recordings must have the same resolution to be combined. " +
-                    "This one is ${width}x$height and the new one is ${otherWidth}x$otherHeight.",
-            )
-        }
-        if (!sameBytes(a, b, "csd-0") || !sameBytes(a, b, "csd-1")) {
-            throw Failure("Recordings use different encoder settings and cannot be combined on Android")
-        }
+        // Bake rotation into the pixels for the editor's WebCodecs path.
+        if (mimeOf(a) != mimeOf(b) || first.rotationDegrees != 0 || second.rotationDegrees != 0) return false
+        if (VIDEO_FORMAT_KEYS.any { formatInt(a, it) != formatInt(b, it) }) return false
+        if (VIDEO_CONFIG_KEYS.any { !sameBytes(a, b, it) }) return false
 
         val aAudio = first.audioFormat
         val bAudio = second.audioFormat
-        if (aAudio != null && bAudio != null) {
-            if (mimeOf(aAudio) != mimeOf(bAudio) ||
-                formatInt(aAudio, MediaFormat.KEY_SAMPLE_RATE) !=
-                formatInt(bAudio, MediaFormat.KEY_SAMPLE_RATE) ||
-                formatInt(aAudio, MediaFormat.KEY_CHANNEL_COUNT) !=
-                formatInt(bAudio, MediaFormat.KEY_CHANNEL_COUNT) ||
-                !sameBytes(aAudio, bAudio, "csd-0")
-            ) {
-                throw Failure("Recordings use different audio settings and cannot be combined on Android")
-            }
-        }
+        // Use the transcoder for a missing track so silence is explicit and
+        // does not shift a later clip's first audio packet to time zero.
+        if (aAudio == null || bAudio == null) return aAudio == null && bAudio == null
+        return mimeOf(aAudio) == mimeOf(bAudio) &&
+            formatInt(aAudio, MediaFormat.KEY_SAMPLE_RATE) == formatInt(bAudio, MediaFormat.KEY_SAMPLE_RATE) &&
+            formatInt(aAudio, MediaFormat.KEY_CHANNEL_COUNT) == formatInt(bAudio, MediaFormat.KEY_CHANNEL_COUNT) &&
+            sameBytes(aAudio, bAudio, "csd-0")
     }
+
+    private val VIDEO_FORMAT_KEYS = listOf(
+        MediaFormat.KEY_WIDTH, MediaFormat.KEY_HEIGHT,
+        MediaFormat.KEY_COLOR_STANDARD, MediaFormat.KEY_COLOR_RANGE, MediaFormat.KEY_COLOR_TRANSFER,
+        MediaFormat.KEY_PIXEL_ASPECT_RATIO_WIDTH, MediaFormat.KEY_PIXEL_ASPECT_RATIO_HEIGHT,
+    )
+    private val VIDEO_CONFIG_KEYS = listOf("csd-0", "csd-1", "csd-2")
 
     private fun sameBytes(a: MediaFormat, b: MediaFormat, key: String): Boolean {
         val left = a.getByteBuffer(key)?.let(::bytesOf) ?: return b.getByteBuffer(key) == null
@@ -239,25 +243,29 @@ internal object RecordingImport {
                 val rawPts = reader.sampleTimeUs
                 val flags = reader.sampleFlags
                 reader.advance()
-                if (flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) continue
+                if (flags and MediaExtractor.SAMPLE_FLAG_ENCRYPTED != 0) {
+                    throw Failure("A protected recording cannot be appended")
+                }
 
                 // Each half must open on a sync frame: a gap-free sample stream
                 // still decodes to garbage if an appended half starts on a
-                // non-keyframe.
-                if (track == videoTrack && reader.firstSample &&
-                    flags and MediaCodec.BUFFER_FLAG_KEY_FRAME == 0
+                // non-keyframe. Do not rewrite B-frame timestamps to make
+                // presentation order look monotonic.
+                val sync = flags and MediaExtractor.SAMPLE_FLAG_SYNC != 0
+                if ((track == videoTrack && reader.firstSample && !sync) ||
+                    flags and MediaExtractor.SAMPLE_FLAG_PARTIAL_FRAME != 0 ||
+                    rawPts <= lastPts[slot]
                 ) {
-                    throw Failure("${input.file.name} does not start on a keyframe")
+                    throw NeedsTranscode()
                 }
                 reader.firstSample = false
 
-                val pts = maxOf(rawPts, lastPts[slot] + 1L)
                 info.offset = 0
                 info.size = size
-                info.presentationTimeUs = pts
-                info.flags = flags
+                info.presentationTimeUs = rawPts
+                info.flags = if (sync) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
                 muxer.writeSampleData(track, buffer, info)
-                lastPts[slot] = pts
+                lastPts[slot] = rawPts
             }
         } finally {
             video.release()
@@ -309,7 +317,19 @@ internal object RecordingImport {
         val audioTrack: Int?,
         val audioFormat: MediaFormat?,
         val durationMs: Long,
+        val rotationDegrees: Int,
     ) {
+        val displaySize: FrameSize
+            get() {
+                val width = formatInt(videoFormat, MediaFormat.KEY_WIDTH)
+                val height = formatInt(videoFormat, MediaFormat.KEY_HEIGHT)
+                val sarX = formatInt(videoFormat, MediaFormat.KEY_PIXEL_ASPECT_RATIO_WIDTH).coerceAtLeast(1)
+                val sarY = formatInt(videoFormat, MediaFormat.KEY_PIXEL_ASPECT_RATIO_HEIGHT).coerceAtLeast(1)
+                val displayWidth = (width * sarX.toDouble() / sarY).roundToInt().coerceAtLeast(1)
+                return if (rotationDegrees == 90 || rotationDegrees == 270) FrameSize(height, displayWidth)
+                else FrameSize(displayWidth, height)
+            }
+
         fun close() {
             runCatching { extractor.release() }
         }
@@ -337,8 +357,8 @@ internal object RecordingImport {
                     if (videoTrack < 0 || videoFormat == null) {
                         throw Failure("${file.name} has no video track")
                     }
-                    if (!videoFormat.containsKey(MediaFormat.KEY_WIDTH) ||
-                        !videoFormat.containsKey(MediaFormat.KEY_HEIGHT)
+                    if (formatInt(videoFormat, MediaFormat.KEY_WIDTH) <= 0 ||
+                        formatInt(videoFormat, MediaFormat.KEY_HEIGHT) <= 0
                     ) {
                         throw Failure("${file.name} has no usable video format")
                     }
@@ -350,6 +370,7 @@ internal object RecordingImport {
                         audioTrack = audioTrack.takeIf { it >= 0 },
                         audioFormat = audioFormat,
                         durationMs = durationMs(file),
+                        rotationDegrees = formatInt(videoFormat, MediaFormat.KEY_ROTATION),
                     )
                 } catch (error: Throwable) {
                     runCatching { extractor.release() }
@@ -373,36 +394,61 @@ internal object RecordingImport {
         }
     }
 
+    private data class FrameSize(val width: Int, val height: Int) {
+        fun even() = FrameSize((width and -2).coerceAtLeast(2), (height and -2).coerceAtLeast(2))
+    }
+
+    /** Same centered fit as the presentation effect; coordinates are normalized. */
+    private data class FrameFit(val x: Double, val y: Double) {
+        companion object {
+            val IDENTITY = FrameFit(1.0, 1.0)
+
+            fun forCanvas(source: FrameSize, canvas: FrameSize): FrameFit {
+                val scale = minOf(canvas.width.toDouble() / source.width, canvas.height.toDouble() / source.height)
+                return FrameFit(source.width * scale / canvas.width, source.height * scale / canvas.height)
+            }
+        }
+
+        fun apply(sample: JSONObject) {
+            remap(sample, "cx", x)
+            remap(sample, "cy", y)
+        }
+
+        private fun remap(sample: JSONObject, key: String, size: Double) {
+            if (size == 1.0) return
+            val coordinate = sample.optDouble(key, Double.NaN)
+            if (coordinate.isFinite()) sample.put(key, (1.0 - size) / 2.0 + coordinate * size)
+        }
+    }
+
     // ------------------------------------------------------------------ //
     // Cursor telemetry
     // ------------------------------------------------------------------ //
 
     /**
-     * One sidecar for the joined file: the first half unchanged, the second
-     * half shifted by [sourceStartMs]. Dimensions are identical (enforced
-     * above), so normalised coordinates need no rescaling.
+     * One sidecar for the joined file: fit coordinates to the output canvas
+     * and shift the second half by the actual join time.
      */
     private fun writeSidecar(
         current: File,
         recording: File,
         output: File,
         sourceStartMs: Long,
+        firstFit: FrameFit,
+        secondFit: FrameFit,
     ) {
         val merged = JSONArray()
-        val firstHalf = readSamples(current)
-        for (index in 0 until firstHalf.length()) {
-            val sample = firstHalf.optJSONObject(index) ?: continue
-            merged.put(JSONObject(sample.toString()))
+        fun appendSamples(file: File, offsetMs: Long, fit: FrameFit) {
+            val samples = readSamples(file)
+            for (index in 0 until samples.length()) {
+                val sample = samples.optJSONObject(index) ?: continue
+                if (offsetMs != 0L) sample.put("timeMs", sample.optLong("timeMs", 0L) + offsetMs)
+                fit.apply(sample)
+                merged.put(sample)
+            }
         }
-        val secondHalf = readSamples(recording)
-        for (index in 0 until secondHalf.length()) {
-            val sample = secondHalf.optJSONObject(index) ?: continue
-            merged.put(
-                JSONObject(sample.toString()).apply {
-                    put("timeMs", optLong("timeMs", 0L) + sourceStartMs)
-                },
-            )
-        }
+        appendSamples(current, 0L, firstFit)
+        appendSamples(recording, sourceStartMs, secondFit)
         val body = JSONObject().apply {
             put("version", 1)
             put("samples", merged)

@@ -49,7 +49,15 @@ if (-not $needsRenderer -and (Test-Path -LiteralPath $rendererIndex)) {
             Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1
         if ($newestSource -and $newestSource.LastWriteTimeUtc -gt $rendererTime) { $needsRenderer = $true }
     }
-    foreach ($source in @($bridgeSource, $androidBridgeSource)) {
+    $rendererInputs = @(
+        $bridgeSource
+        $androidBridgeSource
+        (Join-Path $projectRoot 'scripts\build-renderer.mjs')
+        (Join-Path $projectRoot 'recordly-upstream\index.html')
+        (Join-Path $projectRoot 'recordly-upstream\vite.android.config.mjs')
+        (Join-Path $androidRoot 'app\src\main\res\values\strings.xml')
+    )
+    foreach ($source in $rendererInputs) {
         if ((Test-Path -LiteralPath $source) -and
             (Get-Item -LiteralPath $source).LastWriteTimeUtc -gt $rendererTime) {
             $needsRenderer = $true

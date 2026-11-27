@@ -11,9 +11,9 @@
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { shell, execOut, forward } from "./adb.mjs";
+import { appProcessId, shell, execOut, forward } from "./adb.mjs";
 
-const packageName = "app.recordly.android.debug";
+const packageName = "app.tapswoop.android.debug";
 const serviceName = `${packageName}/app.recordly.android.TelemetryAccessibilityService`;
 const reportOnly = process.argv.includes("--report");
 assert.match(process.env.RECORDLY_DEVICE || "emulator-5554", /^emulator-/, "Use a test emulator");
@@ -164,7 +164,7 @@ await shell(["am", "start", "-n", `${packageName}/app.recordly.android.MainActiv
 await delay(2_000);
 let pid = "";
 for (let attempt = 0; attempt < 20; attempt++) {
-	pid = (await shell(["pidof", packageName])).stdout.trim().split(/\s+/)[0];
+	pid = await appProcessId(packageName);
 	if (pid) break;
 	await delay(500);
 }

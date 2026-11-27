@@ -1,0 +1,125 @@
+/*
+ * From Uiverse.io by vinodjangid07 - https://uiverse.io/vinodjangid07/smart-emu-83
+ * MIT License, Copyright (c) vinodjangid07 (Vinod Jangid)
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
+
+.cut-record-slot {
+  /* The resting caption uses the space reserved for the expanded pill. */
+  flex: 0 0 148px;
+  height: 50px;
+}
+
+.cut .home-actions .cut-record-action {
+  position: relative;
+  width: 100%;
+  height: 50px;
+  padding: 0;
+  border-radius: 50px;
+  outline-offset: 2px;
+  font-weight: 600;
+  touch-action: manipulation;
+}
+
+.cut-record-action__face {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 50px;
+  overflow: hidden;
+  border-radius: 50%;
+  outline: 2px solid #7f1927;
+  outline-offset: -2px;
+  background-color: var(--record-color, #d1293b);
+  color: white;
+  box-shadow: 0 0 20px rgb(122 18 34 / 16.4%);
+  pointer-events: none;
+}
+
+.cut-record-action__glyph {
+  width: 12px;
+  height: auto;
+  flex: none;
+}
+
+.cut-record-action__reveal {
+  position: absolute;
+  top: -20px;
+  left: 0;
+  width: 100%;
+  text-align: center;
+  font-size: 2px;
+  opacity: 0;
+  white-space: nowrap;
+  text-shadow: 0 1px 1px #74191d;
+}
+
+.cut-record-action__caption {
+  position: absolute;
+  top: 50%;
+  left: 57px;
+  transform: translateY(-50%);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.cut-record-action:is(:focus-visible, :active, [data-pressed], [data-preview]) {
+  --record-reveal: 1;
+  --record-color: #ff4545;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .cut-record-action:hover {
+    --record-reveal: 1;
+    --record-color: #ff4545;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cut-record-action__face { transition: background-color 120ms ease; }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .cut-record-action__face {
+    width: calc(50px + 90px * var(--record-reveal, 0));
+    border-radius: calc(25px + 25px * var(--record-reveal, 0));
+    transition: width .3s ease, border-radius .3s ease, background-color .3s ease;
+  }
+
+  .cut-record-action__glyph {
+    width: calc(12px + 38px * var(--record-reveal, 0));
+    transform: translateY(calc(60% * var(--record-reveal, 0)));
+    transition: width .3s ease, transform .3s ease;
+  }
+
+  .cut-record-action__reveal {
+    font-size: calc(2px + 11px * var(--record-reveal, 0));
+    transform: translateY(calc(30px * var(--record-reveal, 0)));
+    opacity: var(--record-reveal, 0);
+    transition: font-size .3s ease, transform .3s ease, opacity .3s ease;
+  }
+
+  .cut-record-action__caption {
+    opacity: calc(1 - var(--record-reveal, 0));
+    transition: opacity .18s ease;
+  }
+}

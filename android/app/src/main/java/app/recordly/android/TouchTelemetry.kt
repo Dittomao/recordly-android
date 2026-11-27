@@ -6,9 +6,11 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityWindowInfo
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.abs
 import kotlin.math.max
 
 /**
@@ -46,8 +48,8 @@ object TouchTelemetry {
      * How long to wait for a real release (`TYPE_TOUCH_INTERACTION_END`) after a
      * click before synthesizing one.
      *
-     * This matters more than it looks. `TYPE_VIEW_CLICKED` is reliable — every
-     * View-based app sends it — but `TYPE_TOUCH_INTERACTION_END` is emitted by
+     * `TYPE_VIEW_CLICKED` confirms an activation where an app emits it.
+     * `TYPE_TOUCH_INTERACTION_END` is emitted by
      * the input pipeline and is not guaranteed at all: on the API 37 emulator it
      * never arrives, for our own app or anyone else's. Waiting for it
      * unconditionally meant taps produced events but *no samples*, which is a
@@ -62,6 +64,7 @@ object TouchTelemetry {
      * animation has a real interval to animate over.
      */
     private const val SYNTHETIC_HOLD_MS = 80L
+    private const val SEMANTIC_DUPLICATE_MS = 150L
 
     /**
      * Uptime of a sample, kept alongside `timeMs` so the origin can be moved
@@ -75,6 +78,7 @@ object TouchTelemetry {
     private val samples = ArrayList<JSONObject>()
 
     private var sessionStartUptime = 0L
+    private var collectingSinceUptime = 0L
     private var started = false
 
     /**
@@ -90,6 +94,7 @@ object TouchTelemetry {
 
     private var pressDownUptime = 0L
     private var pendingClick: PendingClick? = null
+    private var lastAcceptedClick: PendingClick? = null
 
     /** Used to close a click when no release event ever shows up. Set by the service. */
     private var handler: Handler? = null
@@ -100,7 +105,13 @@ object TouchTelemetry {
     private var screenWidth = 1
     private var screenHeight = 1
 
-    private class PendingClick(val cx: Double, val cy: Double, val atUptime: Long)
+    private class PendingClick(
+        val cx: Double,
+        val cy: Double,
+        val atUptime: Long,
+        val source: String?,
+        val semantic: Boolean,
+    )
 
     val lastEventAt = AtomicLong(0L)
 
@@ -127,12 +138,14 @@ object TouchTelemetry {
         synchronized(lock) {
             samples.clear()
             sessionStartUptime = android.os.SystemClock.uptimeMillis()
+            collectingSinceUptime = sessionStartUptime
             started = true
             paused = false
             pauseStartedUptime = 0L
             pausedTotalMs = 0L
             pressDownUptime = 0L
             pendingClick = null
+            lastAcceptedClick = null
         }
         // The session origin is what a capture timestamp gets aligned against:
         // `screenrecord` starts at a known uptime, and sample times are relative
@@ -172,6 +185,7 @@ object TouchTelemetry {
             flushLocked(releaseUptime = atUptime)
             paused = true
             pauseStartedUptime = atUptime
+            lastAcceptedClick = null
             pausedTotalMs
         }
 
@@ -187,6 +201,7 @@ object TouchTelemetry {
             if (!started || !paused) return@synchronized pausedTotalMs
             pausedTotalMs += max(0L, atUptime - pauseStartedUptime)
             pauseStartedUptime = 0L
+            collectingSinceUptime = atUptime
             paused = false
             pausedTotalMs
         }
@@ -230,14 +245,32 @@ object TouchTelemetry {
     /**
      * True while taps should be recorded: a session is open and not paused.
      */
-    private fun active(): Boolean = synchronized(lock) { started && !paused }
+    fun isCollecting(): Boolean = synchronized(lock) { started && !paused }
+
+    /** Only accept a tab that occupies a bounded segment of a full-width bottom bar. */
+    fun isBottomNavigationTab(tab: Rect, bar: Rect): Boolean = synchronized(lock) {
+        bar.width() >= screenWidth * 0.8 &&
+            bar.top >= screenHeight * 0.75 && bar.bottom >= screenHeight * 0.85 &&
+            bar.height() in 1..(screenHeight / 5) &&
+            tab.top == bar.top && tab.bottom == bar.bottom &&
+            tab.width() in 1..(bar.width() / 2) && bar.contains(tab)
+    }
+
+    /** Limit Home launch recognition to real dock icons, not Recents cards or suggestions. */
+    fun isDockIcon(icon: Rect): Boolean = synchronized(lock) {
+        icon.top >= screenHeight * 0.8 &&
+            icon.bottom <= screenHeight &&
+            icon.left >= 0 && icon.right <= screenWidth &&
+            icon.width() in 1..(screenWidth / 3) &&
+            icon.height() in 1..(screenHeight / 5)
+    }
 
     /**
      * Records one accessibility event. Called on the service thread; must stay
      * cheap because it runs for every event while recording.
      */
     fun onEvent(event: AccessibilityEvent, bounds: () -> Rect?) {
-        if (!active()) return
+        if (!isCollecting()) return
         val at = event.eventTime.let { if (it > 0) it else android.os.SystemClock.uptimeMillis() }
         lastEventAt.set(at)
 
@@ -251,18 +284,7 @@ object TouchTelemetry {
             AccessibilityEvent.TYPE_VIEW_CLICKED,
             AccessibilityEvent.TYPE_VIEW_LONG_CLICKED,
             -> {
-                val rect = bounds() ?: return
-                if (rect.width() <= 0 || rect.height() <= 0) return
-                val cx = (rect.exactCenterX().toDouble() / screenWidth).coerceIn(0.0, 1.0)
-                val cy = (rect.exactCenterY().toDouble() / screenHeight).coerceIn(0.0, 1.0)
-                synchronized(lock) {
-                    if (!started || paused) return
-                    // Two taps inside the grace window: close the first now, or
-                    // the second would replace it and the first would vanish.
-                    flushLocked()
-                    pendingClick = PendingClick(cx, cy, at)
-                }
-                handler?.postDelayed(releaseGrace, RELEASE_GRACE_MS)
+                acceptClick(at, event.packageName?.toString(), bounds() ?: return, semantic = false)
             }
 
             // A swipe is not an interaction. Touch framing is tap-anchored, and
@@ -270,6 +292,37 @@ object TouchTelemetry {
             // dwell/camera heuristics. The scroll stays in the video; it adds no
             // telemetry.
         }
+    }
+
+    /** An app-specific activation with verified bounds, but no physical down/up event. */
+    fun onSemanticActivation(event: AccessibilityEvent, rect: Rect) =
+        onSemanticActivation(event.eventTime, event.packageName?.toString(), rect)
+
+    fun onSemanticActivation(atUptime: Long, source: String?, rect: Rect) {
+        val at = atUptime.takeIf { it > 0 } ?: android.os.SystemClock.uptimeMillis()
+        acceptClick(at, source, rect, semantic = true)
+    }
+
+    private fun acceptClick(at: Long, source: String?, rect: Rect, semantic: Boolean) {
+        if (rect.isEmpty) return
+        synchronized(lock) {
+            if (!started || paused || (semantic && at < collectingSinceUptime)) return
+            val cx = (rect.exactCenterX().toDouble() / screenWidth).coerceIn(0.0, 1.0)
+            val cy = (rect.exactCenterY().toDouble() / screenHeight).coerceIn(0.0, 1.0)
+            val previous = lastAcceptedClick
+            // Some app versions emit both signals for one control activation. Do
+            // not deduplicate two ordinary clicks, even at the same location.
+            if (previous != null && (semantic || previous.semantic) && source == previous.source &&
+                at - previous.atUptime in 0L..SEMANTIC_DUPLICATE_MS &&
+                abs(cx - previous.cx) < 0.03 && abs(cy - previous.cy) < 0.03
+            ) return
+            flushLocked()
+            val click = PendingClick(cx, cy, at, source, semantic)
+            lastAcceptedClick = click
+            pendingClick = click
+            if (semantic) flushLocked(releaseUptime = at)
+        }
+        if (!semantic) handler?.postDelayed(releaseGrace, RELEASE_GRACE_MS)
     }
 
     /**
@@ -292,7 +345,7 @@ object TouchTelemetry {
 
         val clickAt = pending.atUptime
         val down = if (
-            pressDownUptime in 1..clickAt &&
+            !pending.semantic && pressDownUptime in 1..clickAt &&
             clickAt - pressDownUptime <= PRESS_MATCH_WINDOW_MS
         ) pressDownUptime else clickAt - SYNTHETIC_HOLD_MS
         val up = (releaseUptime ?: clickAt).coerceAtLeast(down + 1)
@@ -343,12 +396,19 @@ object TouchTelemetry {
 class TelemetryAccessibilityService : AccessibilityService() {
 
     private val boundsRect = Rect()
+    private val handler = Handler(Looper.getMainLooper())
+    private var lastChromeMenuWindowId: Int? = null
+    private var homeGeneration = 0
+    private var visibleDockIcons = emptyMap<String, Rect>()
+    private var dockSplash: DockSplash? = null
+
+    private data class DockSplash(val target: String, val atUptime: Long)
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         val metrics = resources.displayMetrics
         TouchTelemetry.setScreenSize(metrics.widthPixels, metrics.heightPixels)
-        TouchTelemetry.attach(Handler(Looper.getMainLooper()))
+        TouchTelemetry.attach(handler)
         // The session boundary belongs to capture, not to this service: taps
         // only become telemetry while a recording is running, and their times
         // are relative to the first encoded frame. Connecting here used to open
@@ -358,39 +418,159 @@ class TelemetryAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
+        // Even bounds and control IDs are read only during active capture.
+        if (!TouchTelemetry.isCollecting()) {
+            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) clearHome()
+            return
+        }
         // Our own controls and the system UI are not part of the demo. The
         // notification's Pause/Stop taps used to become zoom regions at the end
         // of every take; they are recorded in the video, not as interactions.
         val source = event.packageName?.toString()
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            handleHomeTransition(event, source)
+        }
         if (source != null && (source == packageName || source in SYSTEM_PACKAGES)) return
 
-        val type = event.eventType
-        if (type == AccessibilityEvent.TYPE_TOUCH_INTERACTION_START ||
-            type == AccessibilityEvent.TYPE_TOUCH_INTERACTION_END
-        ) {
-            // Press/release timing only; no node and no bounds needed.
-            TouchTelemetry.onEvent(event) { null }
-            return
-        }
-        if (type != AccessibilityEvent.TYPE_VIEW_CLICKED &&
-            type != AccessibilityEvent.TYPE_VIEW_LONG_CLICKED
-        ) {
-            // Scroll, focus and window-state events do not drive tap zoom.
-            return
-        }
+        when (event.eventType) {
+            AccessibilityEvent.TYPE_TOUCH_INTERACTION_START,
+            AccessibilityEvent.TYPE_TOUCH_INTERACTION_END,
+            -> TouchTelemetry.onEvent(event) { null }
 
-        // Only bounds are read; the node is dropped immediately.
-        val rect = boundsOf(event)
-        if (DEBUG_EVENTS) {
-            Log.d(
-                "TelemetryService",
-                "event ${AccessibilityEvent.eventTypeToString(event.eventType)} " +
-                    "pkg=${event.packageName} win=${event.windowId} " +
-                    "cls=${event.className} bounds=$rect " +
-                    "text=${event.text} desc=${event.contentDescription}",
-            )
+            AccessibilityEvent.TYPE_VIEW_CLICKED,
+            AccessibilityEvent.TYPE_VIEW_LONG_CLICKED,
+            -> TouchTelemetry.onEvent(event) { boundsOf(event) }
+
+            AccessibilityEvent.TYPE_VIEW_SELECTED -> if (source == PLAY_STORE) {
+                playStoreTabBounds(event)?.let { TouchTelemetry.onSemanticActivation(event, it) }
+            }
+
+            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> if (source == CHROME) {
+                chromeMenuButtonBounds(event)?.let { TouchTelemetry.onSemanticActivation(event, it) }
+            }
         }
-        TouchTelemetry.onEvent(event) { rect }
+    }
+
+    private fun clearHome() {
+        homeGeneration++
+        visibleDockIcons = emptyMap()
+        dockSplash = null
+    }
+
+    /**
+     * This OxygenOS launcher emits no click when opening an app from the dock.
+     * Remember only observed dock positions and consume them when the matching
+     * activity opens directly from Home. Do not assume positions or treat
+     * returning through Recents as another launch.
+     */
+    private fun handleHomeTransition(event: AccessibilityEvent, source: String?) {
+        val eventClass = event.className?.toString()
+        // On this Home, its Google search widget sends a FrameLayout event
+        // before the dock launch. The outgoing Play Store can also send a
+        // Compose pane notification after Home is already visible. Neither is
+        // a foreground activity change; Recents and other windows still clear.
+        if ((source == GOOGLE_SEARCH && eventClass == "android.widget.FrameLayout") ||
+            (source == PLAY_STORE && eventClass == "android.view.ViewGroup")
+        ) return
+        if (source == OXYGEN_HOME && eventClass == OXYGEN_HOME_ACTIVITY) {
+            clearHome()
+            val generation = homeGeneration
+            val windowId = event.windowId
+            visibleDockIcons = readDockIcons(windowId)
+            if (visibleDockIcons.isEmpty()) {
+                // Window content can arrive just after its state change.
+                handler.postDelayed({
+                    if (generation == homeGeneration && TouchTelemetry.isCollecting()) {
+                        visibleDockIcons = readDockIcons(windowId)
+                    }
+                }, 120L)
+            }
+            return
+        }
+        // A cold launch shows an app-owned splash before the real activity.
+        // Save its time, but only count it after that same activity arrives.
+        // A later menu popup does not qualify: Home's cache is consumed once.
+        val splash = dockSplash
+        if (source != null && source in visibleDockIcons &&
+            eventClass == "android.widget.FrameLayout" && event.eventTime > 0 &&
+            (splash == null || splash.target == source)
+        ) {
+            if (splash == null) dockSplash = DockSplash(source, event.eventTime)
+            return
+        }
+        val matchingActivity =
+            (source == PLAY_STORE && eventClass == PLAY_STORE_ACTIVITY) ||
+            (source == CHROME && eventClass == CHROME_ACTIVITY)
+        val confirmed = matchingActivity && (splash == null ||
+            (splash.target == source && event.eventTime - splash.atUptime in 0L..DOCK_SPLASH_TIMEOUT_MS))
+        val icon = if (confirmed) visibleDockIcons[source] else null
+        clearHome()
+        if (icon != null) {
+            TouchTelemetry.onSemanticActivation(splash?.atUptime ?: event.eventTime, OXYGEN_HOME, icon)
+        }
+    }
+
+    private fun readDockIcons(windowId: Int): Map<String, Rect> {
+        val root = rootInActiveWindow
+            ?.takeIf { it.windowId == windowId && it.packageName?.toString() == OXYGEN_HOME }
+            ?: return emptyMap()
+        return buildMap {
+            for ((target, label) in DOCK_LABELS) {
+                val bounds = root.findAccessibilityNodeInfosByText(label).mapNotNull { node ->
+                    // Only compare known public app labels. Never store labels or content.
+                    if (node.className?.toString() != "android.widget.TextView" ||
+                        !node.isClickable || !node.isVisibleToUser ||
+                        (node.text?.toString() != label && node.contentDescription?.toString() != label)
+                    ) return@mapNotNull null
+                    Rect().also(node::getBoundsInScreen).takeIf(TouchTelemetry::isDockIcon)
+                }.distinct().singleOrNull()
+                if (bounds != null) put(target, bounds)
+            }
+        }
+    }
+
+    /**
+     * Play Store's Compose navigation emits selection for the tab, not a click.
+     * Reject selected icons, cards, carousels and any non-navigation selection.
+     */
+    private fun playStoreTabBounds(event: AccessibilityEvent): Rect? {
+        if (event.className?.toString() != "android.view.View") return null
+        val node = event.source ?: return null
+        if (!node.isSelected || !node.isVisibleToUser) return null
+        val parent = node.parent ?: return null
+        val tab = Rect().also(node::getBoundsInScreen)
+        val bar = Rect().also(parent::getBoundsInScreen)
+        return tab.takeIf { TouchTelemetry.isBottomNavigationTab(tab, bar) }
+    }
+
+    /**
+     * Chrome opens the overflow via a touch listener without emitting a click
+     * for its button. Recognize only the real overflow list in a separate popup
+     * and use the actual toolbar button's bounds. Never use scroll or page changes.
+     */
+    private fun chromeMenuButtonBounds(event: AccessibilityEvent): Rect? {
+        if (event.className?.toString() != "android.widget.FrameLayout" ||
+            event.windowId == lastChromeMenuWindowId
+        ) return null
+        val applicationWindows = windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+        val popup = applicationWindows.firstOrNull { it.id == event.windowId }?.root ?: return null
+        if (popup.packageName?.toString() != CHROME ||
+            popup.findAccessibilityNodeInfosByViewId("$CHROME:id/app_menu_list").isEmpty()
+        ) return null
+        for (window in applicationWindows) {
+            if (window.id == event.windowId) continue
+            val root = window.root ?: continue
+            if (root.packageName?.toString() != CHROME) continue
+            // The popup may obscure its own anchor; the toolbar view still has
+            // the correct bounds even if Android reports it as not visible.
+            val button = root.findAccessibilityNodeInfosByViewId("$CHROME:id/menu_button")
+                .firstOrNull { it.isClickable } ?: continue
+            val bounds = Rect().also(button::getBoundsInScreen)
+            if (bounds.isEmpty) continue
+            lastChromeMenuWindowId = event.windowId
+            return bounds
+        }
+        return null
     }
 
     private fun boundsOf(event: AccessibilityEvent): Rect? {
@@ -407,6 +587,16 @@ class TelemetryAccessibilityService : AccessibilityService() {
     override fun onInterrupt() = Unit
 
     companion object {
+        private const val CHROME = "com.android.chrome"
+        private const val PLAY_STORE = "com.android.vending"
+        private const val OXYGEN_HOME = "com.android.launcher"
+        private const val GOOGLE_SEARCH = "com.google.android.googlequicksearchbox"
+        private const val OXYGEN_HOME_ACTIVITY = "$OXYGEN_HOME.Launcher"
+        private const val CHROME_ACTIVITY = "org.chromium.chrome.browser.ChromeTabbedActivity"
+        private const val PLAY_STORE_ACTIVITY = "com.google.android.finsky.activities.MainActivity"
+        private const val DOCK_SPLASH_TIMEOUT_MS = 1500L
+        private val DOCK_LABELS = mapOf(PLAY_STORE to "Play Store", CHROME to "Chrome")
+
         /**
          * Windows that are chrome, not the demo: notification shade controls,
          * permission dialogs, and the system's own UI.
@@ -417,13 +607,6 @@ class TelemetryAccessibilityService : AccessibilityService() {
             "com.google.android.permissioncontroller",
             "android",
         )
-
-        /**
-         * One log line per accessibility event. Off by default: during capture
-         * this is a line per event, which is noise. Flip it on first when a tap
-         * is not producing the sample it should.
-         */
-        private const val DEBUG_EVENTS = false
 
         /**
          * True when the user has enabled this service in system settings.

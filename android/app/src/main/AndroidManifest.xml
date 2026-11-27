@@ -14,6 +14,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
 
+    <!-- The floating recorder. Optional: without it the app uses the in-app HUD. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <!-- Returning to the app after a take: the recording is captured while the
          user is elsewhere, and `moveTaskToFront` on our own task is the only
          way back that Android 10+ still allows without user interaction. -->

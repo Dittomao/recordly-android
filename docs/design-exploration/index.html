@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Three interactive Home and Editor design drafts for TapSwoop.">
+  <title>TapSwoop · Design drafts</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="record-action.css">
+  <script src="prototype.js" defer></script>
+</head>
+<body>
+  <main class="review">
+    <header class="review-head">
+      <p class="review-kicker">TapSwoop <span>Concept review / 01</span></p>
+      <h1>Home &amp; Editor</h1>
+      <p>Three ways to go from recording a screen to making the cut.</p>
+    </header>
+    <nav class="directions" aria-label="Design direction">
+      <button type="button" data-theme="studio" aria-pressed="false"><span>01</span> Studio</button>
+      <button type="button" data-theme="pocket" aria-pressed="false"><span>02</span> Pocket</button>
+      <button type="button" data-theme="cut" aria-pressed="true"><span>03</span> Cut Room</button>
+    </nav>
+    <p class="direction-note" id="direction-note"></p>
+    <nav class="screen-switch" aria-label="Phone screen">
+      <button type="button" data-screen="home" aria-pressed="true">Home</button>
+      <button type="button" data-screen="editor" aria-pressed="false">Editor</button>
+    </nav>
+    <div class="screens" data-screen="home">
+      <section class="sample home-sample" aria-label="Home mockup">
+        <div class="sample-caption" aria-hidden="true"><b>01</b> Home</div>
+        <div class="phone home-phone" id="home"></div>
+      </section>
+      <section class="sample editor-sample" aria-label="Editor mockup">
+        <div class="sample-caption" aria-hidden="true"><b>02</b> Editor</div>
+        <div class="phone editor-phone" id="editor"></div>
+      </section>
+    </div>
+    <p class="review-foot">Interactive draft · Sample projects only. Recording, file picking and export are simulated.</p>
+  </main>
+  <dialog id="demo-dialog" aria-labelledby="demo-title">
+    <form method="dialog">
+      <h2 id="demo-title"></h2>
+      <p id="demo-copy"></p>
+      <button type="submit">Done</button>
+    </form>
+  </dialog>
+</body>
+</html>

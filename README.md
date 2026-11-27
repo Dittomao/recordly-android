@@ -1,4 +1,4 @@
-# Recordly for Android
+# TapSwoop
 
 A hybrid port of [Recordly](https://recordly.app) — the open-source screen
 recorder and editor — to Android. The upstream React/PixiJS/WebCodecs renderer
@@ -34,11 +34,20 @@ powershell.exe -ExecutionPolicy Bypass -File scripts/build-android.ps1 -Offline
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The debug APK is `app.recordly.android.debug`. See `docs/COMMANDS.md` for
-emulator startup, the verification suite, and evidence regeneration.
+The debug APK uses `app.tapswoop.android.debug`. It installs separately from
+older APKs and does not move their private data. See `docs/COMMANDS.md` for verification or
+[`docs/PLAY-LISTING.md`](docs/PLAY-LISTING.md) for the store listing draft.
 
 ## Core behavior
 
+- **Cut Room**: searchable Projects and Recordings on Home; a full-width
+  preview, labeled tracks, and contextual editing tools in the Editor.
+- **First-run tour**: four TapSwoop pages cover recording, tap focus, the Cut
+  Room and setup. Its Start recording action unlocks only after Tap focus and
+  the microphone are ready; screen sharing is required on every take. It shows
+  once, respects Reduce Motion and the theme, and can be replayed from
+  Settings → Dev. There is no Skip: **Explore library** and **Start recording**
+  stay disabled until all three rows are complete.
 - **Capture**: MediaProjection → MediaCodec H.264 → per-segment MP4 → sample-level
   join, with AAC microphone audio and pause/resume.
 - **Touch telemetry**: accessibility click bounds become `CursorTelemetryPoint`
@@ -57,6 +66,8 @@ emulator startup, the verification suite, and evidence regeneration.
 ```sh
 node --test bridge/bridge.test.mjs bridge/android.test.mjs
 node scripts/check-parity.mjs --strict
+node dev/verify-cut-room-ui.mjs
+node dev/verify-onboarding-ui.mjs
 node dev/verify-autozoom.mjs
 node dev/verify-capture.mjs
 node dev/verify-telemetry.mjs

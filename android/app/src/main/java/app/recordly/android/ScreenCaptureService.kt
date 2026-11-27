@@ -870,16 +870,16 @@ class ScreenCaptureService : Service() {
 
     private fun createChannel() {
         val manager = getSystemService(NotificationManager::class.java) ?: return
-        if (manager.getNotificationChannel(CHANNEL_ID) == null) {
-            manager.createNotificationChannel(
-                NotificationChannel(CHANNEL_ID, "Screen recording", NotificationManager.IMPORTANCE_LOW)
-                    .apply {
-                        description = "Shown while Recordly is recording your screen"
-                        setShowBadge(false)
-                        enableVibration(false)
-                    },
-            )
-        }
+        // Update the description on upgrades without changing the channel ID
+        // or replacing any of the user's notification preferences.
+        val recordingChannel = manager.getNotificationChannel(CHANNEL_ID)
+            ?: NotificationChannel(CHANNEL_ID, "Screen recording", NotificationManager.IMPORTANCE_LOW)
+                .apply {
+                    setShowBadge(false)
+                    enableVibration(false)
+                }
+        recordingChannel.description = getString(R.string.recording_channel_description, getString(R.string.app_name))
+        manager.createNotificationChannel(recordingChannel)
         if (manager.getNotificationChannel(SAVED_CHANNEL_ID) == null) {
             manager.createNotificationChannel(
                 NotificationChannel(
@@ -912,7 +912,7 @@ class ScreenCaptureService : Service() {
         }
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_recording)
-            .setContentTitle("Recordly")
+            .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
@@ -936,6 +936,14 @@ class ScreenCaptureService : Service() {
         }
 
         val notification = builder.build()
+        if (finishing) {
+            // The service is already foregrounded. Android may have revoked
+            // the projection, so starting it again with that foreground
+            // type would recheck a permission we no longer hold.
+            return runCatching {
+                getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification)
+            }.onFailure { Log.w(TAG, "cannot update the finishing notification", it) }.isSuccess
+        }
         return try {
             startForeground(
                 NOTIFICATION_ID,

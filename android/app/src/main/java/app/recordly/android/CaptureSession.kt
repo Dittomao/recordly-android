@@ -74,6 +74,15 @@ object CaptureSession {
     @Volatile
     private var recoverable: File? = null
 
+    /**
+     * Set when the native recorder overlay ends a take.
+     *
+     * The overlay never loaded the renderer's HUD surface, so no page handler
+     * will adopt the finished file. The activity claims it once capture stops.
+     */
+    @Volatile
+    private var openEditorOnStop = false
+
     /** Installed by [NativeBridge]; the only route to the renderer. */
     @Volatile
     var emitter: ((String, JSONObject) -> Unit)? = null
@@ -100,6 +109,21 @@ object CaptureSession {
         val onRecordingStarted: () -> Unit,
         /** Capture is over, file written. */
         val onRecordingStopped: () -> Unit,
+        /**
+         * The overlay asked to end the take and open the editor.
+         *
+         * The normal renderer stop path owns its own handoff; this is only for
+         * a stop initiated by the native recorder overlay, where the page never
+         * saw the HUD surface.
+         */
+        val onRecordingFinished: ((File) -> Unit)? = null,
+        /**
+         * Brings the app's task forward before the overlay requests projection.
+         *
+         * The setup can be open over another app; Android will not show a
+         * MediaProjection consent from a background activity.
+         */
+        val bringAppToFront: (() -> Unit)? = null,
     )
 
     @Volatile
@@ -126,7 +150,7 @@ object CaptureSession {
     fun detach() {
         hooks = null
         // An activity destroyed mid-dialog will never deliver a result.
-        finishStart(failure("Recordly left the foreground before capture started"))
+        finishStart(failure("The app left the foreground before capture started"))
         completePermissions(emptyMap())
         // Release the consent watchdog (and the single finalizer thread that
         // awaits it); the dialog result will never arrive.
@@ -146,6 +170,10 @@ object CaptureSession {
         val action = hooks?.showEditor ?: return false
         action()
         return true
+    }
+
+    fun bringAppToFront() {
+        hooks?.bringAppToFront?.invoke()
     }
 
     fun isRecording(): Boolean = phase == Phase.RECORDING || phase == Phase.PAUSED
@@ -208,7 +236,7 @@ object CaptureSession {
     private fun requestConsentLocked() {
         val launch = hooks?.requestProjection
         if (launch == null) {
-            finishStart(failure("Recordly is not in the foreground"))
+            finishStart(failure("The app is not in the foreground"))
             return
         }
         pendingConsent = CountDownLatch(1)
@@ -299,7 +327,7 @@ object CaptureSession {
         }
         val context = AppHost.applicationContext()
         if (context == null) {
-            finishStart(failure("Recordly is not running"))
+            finishStart(failure("The app is not running"))
             return
         }
         try {
@@ -404,8 +432,7 @@ object CaptureSession {
     }
 
     /** Non-blocking [stop], for callers that must not hold a thread. */
-    fun stopAsync(): CompletableFuture<JSONObject> {
-        val future = synchronized(lock) {
+    fun stopAsync(): CompletableFuture<JSONObject> {        val future = synchronized(lock) {
             if (phase == Phase.IDLE) {
                 return CompletableFuture.completedFuture(
                     lastOutput?.let { ok(it) } ?: failure("No screen recording is active"),
@@ -419,7 +446,7 @@ object CaptureSession {
         val context = AppHost.applicationContext()
         if (context == null) {
             synchronized(lock) { pendingStop = null }
-            return CompletableFuture.completedFuture(failure("Recordly is not running"))
+            return CompletableFuture.completedFuture(failure("The app is not running"))
         }
         ScreenCaptureService.requestStop(context)
         return future
@@ -434,8 +461,39 @@ object CaptureSession {
         // other recordings and stays offerable to the interrupted path.
         val adopted = finishStop(result)
         if (file != null && !adopted) recoverable = file
+        val openEditor = openEditorOnStop
+        openEditorOnStop = false
         emit(EVENT_RECORDING_STATE, JSONObject().put("recording", false))
         hooks?.onRecordingStopped?.invoke()
+        if (openEditor && file != null) hooks?.onRecordingFinished?.invoke(file)
+    }
+
+    /**
+     * Ends a take started from the native overlay and asks the activity to open
+     * the editor with the finished file.
+     *
+     * Kept separate from [stopAsync] so the renderer's own stop path, which
+     * performs its handoff in the page, is unchanged.
+     */
+    fun stopForEditor(): CompletableFuture<JSONObject> {
+        openEditorOnStop = true
+        return stopAsync()
+    }
+
+    /**
+     * Marks a take as started from the native overlay.
+     *
+     * If the user ends it from the system notification instead, the activity
+     * still knows to open the finished file rather than dropping the user back
+     * on the Home with no handoff.
+     */
+    fun markOverlayTake() {
+        openEditorOnStop = true
+    }
+
+    /** The overlay start was cancelled; the normal HUD path owns the next take. */
+    fun clearOverlayTake() {
+        openEditorOnStop = false
     }
 
     /** Returns whether an outstanding [stopAsync] caller received the file. */

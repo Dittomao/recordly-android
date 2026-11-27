@@ -8,7 +8,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "app.recordly.android"
+        applicationId = "app.tapswoop.android"
         minSdk = 29
         targetSdk = 35
         versionCode = 1
@@ -71,4 +71,5 @@ dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.activity:activity-ktx:1.9.3")
     implementation("androidx.webkit:webkit:1.12.1")
+    implementation("androidx.media3:media3-transformer:1.9.4")
 }
