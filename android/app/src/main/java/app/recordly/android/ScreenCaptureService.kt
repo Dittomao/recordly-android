@@ -14,12 +14,14 @@ import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.MediaCodec
 import android.media.MediaCodecInfo
+import android.media.MediaCodecList
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
@@ -29,6 +31,7 @@ import android.util.Log
 import android.view.Display
 import android.view.Surface
 import android.view.WindowManager
+import android.widget.RemoteViews
 import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import java.io.File
@@ -99,10 +102,13 @@ class ScreenCaptureService : Service() {
 
     private var width = 0
     private var height = 0
+    private var encodeWidth = 0
+    private var encodeHeight = 0
     private var densityDpi = 0
 
     private var microphoneEnabled = false
     private var microphoneUnavailableNotified = false
+    private var recoveryAttempts = 0
 
     /** Where the joined timeline starts: the first frame's presentation time. */
     @Volatile
@@ -233,6 +239,9 @@ class ScreenCaptureService : Service() {
         width = metrics.widthPixels and 1.inv()
         height = metrics.heightPixels and 1.inv()
         densityDpi = metrics.densityDpi
+        val (resolvedWidth, resolvedHeight) = resolveSupportedEncodeSize(width, height)
+        encodeWidth = resolvedWidth
+        encodeHeight = resolvedHeight
 
         // Segment files are scratch; a failed run must not accumulate them.
         segmentDir.deleteRecursively()
@@ -241,8 +250,8 @@ class ScreenCaptureService : Service() {
         val display = try {
             obtained.createVirtualDisplay(
                 "recordly-capture",
-                width,
-                height,
+                encodeWidth,
+                encodeHeight,
                 densityDpi,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 null,
@@ -264,6 +273,7 @@ class ScreenCaptureService : Service() {
 
         // Telemetry and capture share this boundary; the origin is corrected to
         // the first encoded frame's timestamp once the encoder reports it.
+        recoveryAttempts = 0
         TouchTelemetry.startSession()
         TouchTelemetry.setScreenSize(width, height)
 
@@ -281,7 +291,7 @@ class ScreenCaptureService : Service() {
         stopping = false
         showNotification()
         CaptureSession.onCaptureStarted(microphoneEnabled)
-        Log.i(TAG, "capture started ${width}x$height @ $densityDpi (microphone=$microphoneEnabled)")
+        Log.i(TAG, "capture started ${width}x$height (encode ${encodeWidth}x$encodeHeight) @ $densityDpi (microphone=$microphoneEnabled)")
     }
 
     /**
@@ -333,11 +343,12 @@ class ScreenCaptureService : Service() {
         // Same instant for the telemetry clock and for the next segment's
         // offset, so the two timelines stay in lockstep.
         val boundary = SystemClock.uptimeMillis()
+        val endMonoUs = System.nanoTime() / 1000L
         TouchTelemetry.pauseClock(boundary)
-        endCurrentSegment()
-        // Detaching after the EOS: frames already in the pipeline are encoded,
-        // nothing new enters.
+        // Detach before ending the segment so SurfaceFlinger cleanly disconnects
+        // before the encoder releases its BufferQueue consumer.
         runCatching { virtualDisplay?.surface = null }
+        endCurrentSegment(endMonoUs)
         showNotification()
         Log.i(TAG, "capture paused")
         return true
@@ -385,8 +396,10 @@ class ScreenCaptureService : Service() {
         stopping = true
         recording = false
         paused = false
+        val endMonoUs = System.nanoTime() / 1000L
         TouchTelemetry.stopSession()
-        endCurrentSegment()
+        runCatching { virtualDisplay?.surface = null }
+        endCurrentSegment(endMonoUs)
         teardown()
 
         val target = outputFile()
@@ -422,8 +435,9 @@ class ScreenCaptureService : Service() {
         projection = null
     }
 
-    private fun endCurrentSegment() {
+    private fun endCurrentSegment(endedMonoUs: Long = System.nanoTime() / 1000L) {
         val segment = synchronized(segments) { segments.lastOrNull() } ?: return
+        if (segment.endedMonoUs <= 0L) segment.endedMonoUs = endedMonoUs
         segment.endRequested = true
         // The drain thread signals EOS and flushes the muxer. Ten seconds is
         // several frame times past generous; a slow device should still finish,
@@ -469,7 +483,7 @@ class ScreenCaptureService : Service() {
      */
     private fun joinSegments(target: File): Boolean {
         val (usable, stalled) = synchronized(segments) {
-            segments.filter { it.finished.count == 0L && it.sampleCount > 0 } to
+            segments.filter { it.finished.count == 0L && it.sampleCount > 0 && it.firstVideoMonoUs >= 0L } to
                 segments.count { it.sampleCount > 0 && it.finished.count != 0L }
         }
         if (usable.isEmpty()) {
@@ -501,13 +515,13 @@ class ScreenCaptureService : Service() {
             var lastVideoSample: ByteArray? = null
             var lastVideoPtsUs = -1L
             var lastVideoFlags = 0
-            if (usable.first().firstVideoPtsUs < 0L) return false
-            timelineBasePtsUs = usable.first().firstVideoPtsUs - usable.first().pauseOffsetMs * 1000L
-            for (segment in usable) {
+            if (usable.first().firstVideoMonoUs < 0L) return false
+            timelineBasePtsUs = usable.first().firstVideoMonoUs - usable.first().pauseOffsetMs * 1000L
+            for ((segmentIndex, segment) in usable.withIndex()) {
                 val readers = ArrayList<EncodedTrack>()
                 try {
                     readers.add(EncodedTrack(
-                        segment.file, "video/", videoTrack, segment.firstVideoPtsUs, segment.pauseOffsetMs,
+                        segment.file, "video/", videoTrack, segment.firstVideoMonoUs, segment.pauseOffsetMs,
                     ))
                     if (audioTrack != null) {
                         segment.microphone?.takeIf { it.hasSamples() }?.let { microphone ->
@@ -521,6 +535,15 @@ class ScreenCaptureService : Service() {
                     // selectTrack already selects the first sample; never advance
                     // before writing it (short segments can contain one frame).
                     val videoReader = readers.firstOrNull { it.outputTrack == videoTrack }
+                    val nextSegmentStartUs = usable.getOrNull(segmentIndex + 1)?.let { next ->
+                        next.firstVideoMonoUs - timelineBasePtsUs - next.pauseOffsetMs * 1000L
+                    } ?: Long.MAX_VALUE
+                    val segmentActiveEndUs = if (segment.endedMonoUs > 0L) {
+                        segment.endedMonoUs - timelineBasePtsUs - segment.pauseOffsetMs * 1000L
+                    } else {
+                        -1L
+                    }
+                    var segmentLastVideoOutUs = -1L
                     while (true) {
                         val reader = readers.filter { it.extractor.sampleTime >= 0L }
                             .minByOrNull { it.joinedTimeUs() } ?: break
@@ -536,16 +559,19 @@ class ScreenCaptureService : Service() {
                         if (size < 0) break
                         val track = reader.outputTrack
                         val joinedUs = max(ptsUs, lastOutUs[track] + 1L)
-                        // The microphone runs through the video drain so the
-                        // audio covers the final frame; anything past it is
-                        // dropped here instead of extending the container.
+                        // Preserve all audio inside this segment's true active
+                        // wall-clock span (e.g. a static screen at the end of a
+                        // take) while still capping past the segment end or the
+                        // start of the next resumed segment.
                         val videoExhausted =
                             videoReader == null || videoReader.extractor.sampleTime < 0L
-                        if (track == audioTrack && videoExhausted && lastVideoPtsUs >= 0L &&
-                            joinedUs > lastVideoPtsUs + AUDIO_TAIL_TOLERANCE_US
-                        ) {
-                            reader.extractor.advance()
-                            continue
+                        if (track == audioTrack && videoExhausted) {
+                            val maxTailUs = maxOf(segmentLastVideoOutUs, segmentActiveEndUs) + AUDIO_TAIL_TOLERANCE_US
+                            val audioCapUs = minOf(maxTailUs, nextSegmentStartUs)
+                            if (segmentLastVideoOutUs >= 0L && joinedUs > audioCapUs) {
+                                reader.extractor.advance()
+                                continue
+                            }
                         }
                         info.offset = 0
                         info.size = size
@@ -559,6 +585,7 @@ class ScreenCaptureService : Service() {
                             duplicate.limit(info.offset + size)
                             lastVideoSample = ByteArray(size).also(duplicate::get)
                             lastVideoPtsUs = joinedUs
+                            segmentLastVideoOutUs = joinedUs
                             lastVideoFlags = info.flags
                         }
                         lastOutUs[track] = joinedUs
@@ -568,17 +595,25 @@ class ScreenCaptureService : Service() {
                     readers.forEach { runCatching { it.extractor.release() } }
                 }
             }
-            // Bound the final frame's duration to one frame interval. The
-            // duplicate adds at most ~33 ms to the file; without it the player
-            // sees the last static frame held for the whole tail (measured
-            // 0.86 s), and the editor treats that as extra video with no audio.
+            // Bound the final frame's duration cleanly; if static audio ran
+            // longer and the final sample is a keyframe, extend the static hold
+            // to match audio safely without P-frame smear.
             val tail = lastVideoSample
             if (tail != null && lastVideoPtsUs >= 0L) {
                 val intervalUs = 1_000_000L / TARGET_FRAME_RATE
+                val audioTailUs = if (audioTrack != null) lastOutUs[audioTrack] else -1L
+                val targetEndUs = if (
+                    audioTailUs > lastVideoPtsUs + intervalUs &&
+                    (lastVideoFlags and MediaCodec.BUFFER_FLAG_KEY_FRAME) != 0
+                ) {
+                    audioTailUs
+                } else {
+                    lastVideoPtsUs + intervalUs
+                }
                 val tailBuffer = java.nio.ByteBuffer.wrap(tail)
                 info.offset = 0
                 info.size = tail.size
-                info.presentationTimeUs = lastVideoPtsUs + intervalUs
+                info.presentationTimeUs = targetEndUs
                 info.flags = lastVideoFlags
                 muxer.writeSampleData(videoTrack, tailBuffer, info)
                 writtenSamples++
@@ -693,12 +728,25 @@ class ScreenCaptureService : Service() {
 
         var trackIndex = -1
         var muxerStarted = false
+        var startedMonoUs = 0L
+
+        @Volatile
+        var endedMonoUs = 0L
 
         @Volatile
         var sampleCount = 0
 
         @Volatile
         var firstVideoPtsUs = -1L
+
+        @Volatile
+        var firstVideoMonoUs = -1L
+
+        @Volatile
+        var videoPtsToMonoOffsetUs = 0L
+
+        @Volatile
+        var failedUnexpectedly = false
 
         var microphone: MicrophoneCapture? = null
 
@@ -708,21 +756,61 @@ class ScreenCaptureService : Service() {
         val finished = CountDownLatch(1)
     }
 
-    private fun encoderFormat(): MediaFormat = MediaFormat.createVideoFormat(
+    private fun resolveSupportedEncodeSize(rawW: Int, rawH: Int): Pair<Int, Int> {
+        val caps = findAvcVideoCapabilities() ?: return rawW to rawH
+        if (caps.isSizeSupported(rawW, rawH)) return rawW to rawH
+        val wAlign = caps.widthAlignment.coerceAtLeast(2)
+        val hAlign = caps.heightAlignment.coerceAtLeast(2)
+        for (pct in intArrayOf(90, 80, 75, 67, 50)) {
+            val w = ((rawW * pct / 100) / wAlign * wAlign).coerceAtLeast(wAlign)
+            val h = ((rawH * pct / 100) / hAlign * hAlign).coerceAtLeast(hAlign)
+            if (caps.isSizeSupported(w, h)) return w to h
+        }
+        val maxW = (caps.supportedWidths.upper / wAlign * wAlign).coerceAtLeast(wAlign)
+        val maxH = (caps.supportedHeights.upper / hAlign * hAlign).coerceAtLeast(hAlign)
+        return minOf(rawW, maxW) to minOf(rawH, maxH)
+    }
+
+    private fun findAvcVideoCapabilities(): MediaCodecInfo.VideoCapabilities? = runCatching {
+        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+            .firstOrNull { info ->
+                info.isEncoder && info.supportedTypes.any {
+                    it.equals(MediaFormat.MIMETYPE_VIDEO_AVC, ignoreCase = true)
+                }
+            }
+            ?.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC)
+            ?.videoCapabilities
+    }.getOrNull()
+
+    private fun encoderFormat(
+        capabilities: MediaCodecInfo.VideoCapabilities?,
+        includeRepeatAfter: Boolean,
+    ): MediaFormat = MediaFormat.createVideoFormat(
         MediaFormat.MIMETYPE_VIDEO_AVC,
-        width,
-        height,
+        encodeWidth,
+        encodeHeight,
     ).apply {
         setInteger(
             MediaFormat.KEY_COLOR_FORMAT,
             MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface,
         )
-        setInteger(MediaFormat.KEY_BIT_RATE, bitrate())
-        setInteger(MediaFormat.KEY_FRAME_RATE, TARGET_FRAME_RATE)
+        val rawBitrate = bitrate(encodeWidth, encodeHeight)
+        val clampedBitrate = capabilities?.bitrateRange?.let { range ->
+            rawBitrate.coerceIn(range.lower, range.upper)
+        } ?: rawBitrate
+        val maxFps = capabilities?.let { caps ->
+            runCatching { caps.getSupportedFrameRatesFor(encodeWidth, encodeHeight).upper.toInt() }.getOrNull()
+        } ?: TARGET_FRAME_RATE
+        val configuredFps = maxFps.coerceIn(24, TARGET_FRAME_RATE)
+        setInteger(MediaFormat.KEY_BIT_RATE, clampedBitrate)
+        setInteger(MediaFormat.KEY_FRAME_RATE, configuredFps)
         // A second between keyframes: the editor seeks while trimming, and each
         // pause boundary starts a new file so it starts on one anyway.
         setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
         setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+        if (includeRepeatAfter) {
+            setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, STATIC_FRAME_REPEAT_US)
+        }
     }
 
     /**
@@ -733,10 +821,32 @@ class ScreenCaptureService : Service() {
      * to what a phone encoder will accept, and never goes below the quality
      * floor that makes text legible after the editor re-encodes on export.
      */
-    private fun bitrate(): Int {
-        val pixels = width.toLong() * height.toLong()
+    private fun bitrate(w: Int = encodeWidth, h: Int = encodeHeight): Int {
+        val pixels = w.toLong() * h.toLong()
         val scaled = (18_000_000L * pixels / (1920L * 1080L)).coerceIn(8_000_000L, 24_000_000L)
         return scaled.toInt()
+    }
+
+    private fun configureVideoEncoder(codec: MediaCodec) {
+        val capabilities = runCatching {
+            codec.codecInfo.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC).videoCapabilities
+        }.getOrNull() ?: findAvcVideoCapabilities()
+        try {
+            codec.configure(
+                encoderFormat(capabilities, includeRepeatAfter = true),
+                null,
+                null,
+                MediaCodec.CONFIGURE_FLAG_ENCODE,
+            )
+        } catch (error: Throwable) {
+            Log.w(TAG, "retrying encoder configure without KEY_REPEAT_PREVIOUS_FRAME_AFTER", error)
+            codec.configure(
+                encoderFormat(capabilities, includeRepeatAfter = false),
+                null,
+                null,
+                MediaCodec.CONFIGURE_FLAG_ENCODE,
+            )
+        }
     }
 
     private fun startSegment(pauseOffsetMs: Long): Segment? {
@@ -747,13 +857,18 @@ class ScreenCaptureService : Service() {
 
         return try {
             val codec = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
-            codec.configure(encoderFormat(), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            configureVideoEncoder(codec)
             val surface = codec.createInputSurface()
             val muxer = MediaMuxer(segment.file.path, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             segment.codec = codec
             segment.surface = surface
             segment.muxer = muxer
             codec.start()
+
+            val display = virtualDisplay ?: throw IllegalStateException("VirtualDisplay is gone")
+            display.surface = surface
+            segment.startedMonoUs = System.nanoTime() / 1000L
+
             if (microphoneEnabled) {
                 segment.microphone = try {
                     MicrophoneCapture.start(File(segmentDir, "microphone-$index.m4a"))
@@ -769,15 +884,10 @@ class ScreenCaptureService : Service() {
             Thread({ drain(segment) }, "recordly-encoder-$index").apply {
                 isDaemon = true
             }.start()
-
-            // If the display refuses the surface, the segment still exists and
-            // is closed by the pause/stop path; failing the whole start here
-            // would leak both.
-            runCatching { virtualDisplay?.surface = surface }
-                .onFailure { Log.e(TAG, "cannot attach the encoder surface", it) }
             segment
         } catch (error: Throwable) {
             Log.e(TAG, "cannot start encoder segment $index", error)
+            runCatching { virtualDisplay?.surface = null }
             segment.microphone?.requestStop()
             runCatching { segment.codec.stop() }
             runCatching { segment.codec.release() }
@@ -798,6 +908,9 @@ class ScreenCaptureService : Service() {
         val info = MediaCodec.BufferInfo()
         var eosSignalled = false
         var eosDeadline = 0L
+        var lastKeyFrameMonoUs = 0L
+        var lastSyncRequestMonoUs = 0L
+        var unexpectedFailure = false
         try {
             while (true) {
                 if (!eosSignalled && segment.endRequested) {
@@ -825,21 +938,44 @@ class ScreenCaptureService : Service() {
                         if (info.size > 0 && buffer != null && segment.muxerStarted &&
                             info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG == 0
                         ) {
-                            if (segment.firstVideoPtsUs < 0L) segment.firstVideoPtsUs = info.presentationTimeUs
-                            alignTimeline(segment, info.presentationTimeUs)
+                            val monoUs = recordVideoTimestamp(segment, info.presentationTimeUs)
+                            if (info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0) {
+                                lastKeyFrameMonoUs = monoUs
+                            } else if (
+                                lastKeyFrameMonoUs > 0L &&
+                                monoUs - lastKeyFrameMonoUs >= KEYFRAME_REQUEST_INTERVAL_US &&
+                                monoUs - lastSyncRequestMonoUs >= 1_000_000L
+                            ) {
+                                runCatching {
+                                    segment.codec.setParameters(
+                                        Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_REQUEST_SYNC_FRAME, 0) },
+                                    )
+                                }
+                                lastSyncRequestMonoUs = monoUs
+                            }
                             buffer.position(info.offset)
                             buffer.limit(info.offset + info.size)
                             segment.muxer.writeSampleData(segment.trackIndex, buffer, info)
                             segment.sampleCount += 1
+                            if (segment.sampleCount >= 5) recoveryAttempts = 0
                         }
                         segment.codec.releaseOutputBuffer(status, false)
-                        if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) break
+                        if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                            if (!segment.endRequested) unexpectedFailure = true
+                            break
+                        }
                     }
                 }
             }
         } catch (error: Throwable) {
             Log.e(TAG, "encoder segment ${segment.index} failed", error)
+            if (!segment.endRequested) unexpectedFailure = true
         } finally {
+            if (unexpectedFailure) {
+                if (segment.endedMonoUs <= 0L) segment.endedMonoUs = System.nanoTime() / 1000L
+                segment.failedUnexpectedly = true
+                segment.microphone?.requestStop()
+            }
             runCatching { segment.codec.stop() }
             runCatching { segment.codec.release() }
             runCatching { segment.surface.release() }
@@ -847,19 +983,57 @@ class ScreenCaptureService : Service() {
             runCatching { segment.muxer.release() }
             segment.finished.countDown()
         }
+        if (unexpectedFailure && recording && !paused && !stopping) {
+            finalizer.execute { recoverDroppedSegment() }
+        }
+    }
+
+    private fun recordVideoTimestamp(segment: Segment, ptsUs: Long): Long {
+        if (segment.firstVideoPtsUs < 0L) {
+            val nowMonoUs = System.nanoTime() / 1000L
+            val nowBootUs = SystemClock.elapsedRealtimeNanos() / 1000L
+            val nowUptimeMs = SystemClock.uptimeMillis()
+            val monoDelta = nowMonoUs - ptsUs
+            val bootDelta = nowBootUs - ptsUs
+            val offsetUs = when {
+                monoDelta in -500_000L..15_000_000L -> 0L
+                bootDelta in -500_000L..15_000_000L -> nowMonoUs - nowBootUs
+                else -> nowMonoUs - ptsUs
+            }
+            segment.videoPtsToMonoOffsetUs = offsetUs
+            segment.firstVideoPtsUs = ptsUs
+            segment.firstVideoMonoUs = ptsUs + offsetUs
+            alignTimeline(segment, segment.firstVideoMonoUs, nowMonoUs, nowUptimeMs)
+        }
+        return ptsUs + segment.videoPtsToMonoOffsetUs
+    }
+
+    private fun recoverDroppedSegment() = synchronized(captureLock) {
+        if (!recording || paused || stopping) return@synchronized
+        val current = synchronized(segments) { segments.lastOrNull() }
+        if (current != null && !current.failedUnexpectedly) return@synchronized
+        if (projection == null || virtualDisplay == null || recoveryAttempts >= MAX_RECOVERY_ATTEMPTS) {
+            Log.e(TAG, "capture segment stopped unexpectedly and cannot recover (attempts=$recoveryAttempts)")
+            CaptureSession.onCaptureInterrupted("Screen capture encoder stopped unexpectedly.")
+            return@synchronized
+        }
+        recoveryAttempts++
+        Log.w(TAG, "recovering encoder on live virtual display (attempt $recoveryAttempts)")
+        val replacement = startSegment(TouchTelemetry.currentPausedTotalMs())
+        if (replacement == null) {
+            CaptureSession.onCaptureInterrupted("Could not recover the screen capture encoder.")
+        }
     }
 
     /**
      * Points the telemetry clock at the instant the first frame was captured.
      *
-     * Frame timestamps come from the producer in the monotonic clock, in µs. The
-     * frame we are holding was captured `nowNanos/1000 - pts` ago, so its wall
-     * time is that much before now — no assumption about which clock the
-     * timestamp is on, only that both advance at the same rate.
+     * Normalized to `CLOCK_MONOTONIC` in [recordVideoTimestamp] so sleep time
+     * (`CLOCK_BOOTTIME`) or 0-based encoder timestamps cannot shift tap times.
      */
-    private fun alignTimeline(segment: Segment, ptsUs: Long) {
+    private fun alignTimeline(segment: Segment, firstMonoUs: Long, nowMonoUs: Long, nowUptimeMs: Long) {
         if (!originAligned.compareAndSet(false, true)) return
-        val capturedAtUptime = SystemClock.uptimeMillis() - (System.nanoTime() / 1000 - ptsUs) / 1000
+        val capturedAtUptime = nowUptimeMs - (nowMonoUs - firstMonoUs) / 1000L
         TouchTelemetry.alignOriginTo(capturedAtUptime - segment.pauseOffsetMs)
         Log.i(TAG, "timeline aligned to first frame at uptime $capturedAtUptime")
     }
@@ -870,13 +1044,14 @@ class ScreenCaptureService : Service() {
 
     private fun createChannel() {
         val manager = getSystemService(NotificationManager::class.java) ?: return
-        // Update the description on upgrades without changing the channel ID
-        // or replacing any of the user's notification preferences.
+        runCatching { manager.deleteNotificationChannel(LEGACY_CHANNEL_ID) }
         val recordingChannel = manager.getNotificationChannel(CHANNEL_ID)
-            ?: NotificationChannel(CHANNEL_ID, "Screen recording", NotificationManager.IMPORTANCE_LOW)
+            ?: NotificationChannel(CHANNEL_ID, "Screen recording", NotificationManager.IMPORTANCE_DEFAULT)
                 .apply {
+                    setSound(null, null)
                     setShowBadge(false)
                     enableVibration(false)
+                    enableLights(false)
                 }
         recordingChannel.description = getString(R.string.recording_channel_description, getString(R.string.app_name))
         manager.createNotificationChannel(recordingChannel)
@@ -908,17 +1083,31 @@ class ScreenCaptureService : Service() {
             finishing -> "Finishing the recording…"
             starting -> "Starting…"
             paused -> "Paused"
-            else -> "Recording your screen"
+            else -> "Recording"
         }
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_recording)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(text)
+            .setCategory(Notification.CATEGORY_SERVICE)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(openAppIntent())
+            .apply {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
+                }
+            }
 
         if (!starting && !finishing) {
+            val compact = RemoteViews(packageName, R.layout.notification_recording).apply {
+                setTextViewText(R.id.recording_status, text)
+                setTextViewText(R.id.recording_pause_action, if (paused) "Resume" else "Pause")
+                setOnClickPendingIntent(R.id.recording_pause_action, serviceIntent(ACTION_TOGGLE_PAUSE, 1))
+                setOnClickPendingIntent(R.id.recording_stop_action, serviceIntent(ACTION_STOP_FROM_NOTIFICATION, 2))
+            }
+            builder.setStyle(Notification.DecoratedCustomViewStyle())
+                .setCustomContentView(compact)
             builder.addAction(
                 Notification.Action.Builder(
                     null,
@@ -1026,17 +1215,21 @@ class ScreenCaptureService : Service() {
         private const val EXTRA_RESULT_DATA = "resultData"
         private const val EXTRA_MICROPHONE = "capturesMicrophone"
 
-        private const val CHANNEL_ID = "recordly-capture"
+        private const val LEGACY_CHANNEL_ID = "recordly-capture"
+        private const val CHANNEL_ID = "recordly-capture-controls"
         private const val SAVED_CHANNEL_ID = "recordly-saved"
         private const val NOTIFICATION_ID = 0x5245
         private const val SAVED_NOTIFICATION_ID = 0x5246
 
         private const val TARGET_FRAME_RATE = 60
+        private const val STATIC_FRAME_REPEAT_US = 250_000L
+        private const val KEYFRAME_REQUEST_INTERVAL_US = 2_000_000L
         private const val DEQUEUE_TIMEOUT_US = 10_000L
         private const val SEGMENT_DRAIN_TIMEOUT_S = 10L
         private const val SEGMENT_DRAIN_TIMEOUT_MS = 3_000L
         private const val AUDIO_TAIL_TOLERANCE_US = 40_000L
         private const val MAX_SAMPLE_BYTES = 8 * 1024 * 1024
+        private const val MAX_RECOVERY_ATTEMPTS = 3
 
         /** Upstream names recordings `recording-<stamp>`; exports rely on it. */
         const val RECORDING_PREFIX = "recording-"

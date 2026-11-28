@@ -69,6 +69,7 @@ object TouchTelemetry {
      */
     private const val SYNTHETIC_HOLD_MS = 80L
     private const val SEMANTIC_DUPLICATE_MS = 150L
+    private const val FOCUS_SUPPRESS_MS = 450L
 
     /**
      * Uptime of a sample, kept alongside `timeMs` so the origin can be moved
@@ -251,15 +252,18 @@ object TouchTelemetry {
      */
     fun isCollecting(): Boolean = synchronized(lock) { started && !paused }
 
+    fun currentPausedTotalMs(): Long = synchronized(lock) { pausedTotalMs }
+
     /** Only accept a horizontal navigation/tab item inside a bounded bar strip. */
     fun isHorizontalNavigationTab(tab: Rect, bar: Rect): Boolean = synchronized(lock) {
         if (tab.isEmpty || bar.isEmpty) return@synchronized false
-        val maxHeight = (screenHeight / 5).coerceAtLeast(1)
+        val maxTabHeight = (screenHeight / 6).coerceAtLeast(24)
+        val maxBarHeight = (screenHeight / 4).coerceAtLeast(1)
         val minBarWidth = (screenWidth * 0.42).toInt()
         bar.width() >= minBarWidth &&
-            bar.height() in tab.height()..maxHeight &&
+            bar.height() in tab.height()..maxBarHeight &&
             tab.width() in 24..(screenWidth * 0.65).toInt() &&
-            tab.height() in 24..maxHeight &&
+            tab.height() in 24..maxTabHeight &&
             bar.width() >= (tab.width() * 1.55).toInt() &&
             tab.top >= bar.top - 12 &&
             tab.bottom <= bar.bottom + 12
@@ -284,8 +288,8 @@ object TouchTelemetry {
         val clippedArea = clipped.width().toLong() * clipped.height().toLong()
         if (rawArea <= 0L || clippedArea * 4L < rawArea) return@synchronized null
         val oversizedContainer =
-            clipped.width() >= (screenWidth * 0.88).toInt() &&
-                clipped.height() >= (screenHeight * 0.40).toInt()
+            clipped.width() >= (screenWidth * 0.90).toInt() &&
+                clipped.height() >= (screenHeight * 0.72).toInt()
         if (oversizedContainer) return@synchronized null
         clipped
     }
@@ -336,32 +340,54 @@ object TouchTelemetry {
     }
 
     /** An app-specific activation with verified bounds, but no physical down/up event. */
-    fun onSemanticActivation(event: AccessibilityEvent, rect: Rect) =
-        onSemanticActivation(event.eventTime, event.packageName?.toString(), rect)
+    fun onSemanticActivation(
+        event: AccessibilityEvent,
+        rect: Rect,
+        onlyIfNoRecentTap: Boolean = false,
+    ) = onSemanticActivation(event.eventTime, event.packageName?.toString(), rect, onlyIfNoRecentTap)
 
-    fun onSemanticActivation(atUptime: Long, source: String?, rect: Rect) {
+    fun onSemanticActivation(
+        atUptime: Long,
+        source: String?,
+        rect: Rect,
+        onlyIfNoRecentTap: Boolean = false,
+    ) {
         val at = atUptime.takeIf { it > 0 } ?: android.os.SystemClock.uptimeMillis()
-        acceptClick(at, source, rect, semantic = true)
+        acceptClick(at, source, rect, semantic = true, onlyIfNoRecentTap = onlyIfNoRecentTap)
     }
 
-    private fun acceptClick(at: Long, source: String?, rect: Rect, semantic: Boolean) {
+    private fun acceptClick(
+        at: Long,
+        source: String?,
+        rect: Rect,
+        semantic: Boolean,
+        onlyIfNoRecentTap: Boolean = false,
+    ) {
         if (rect.isEmpty) return
         synchronized(lock) {
-            if (!started || paused || (semantic && at < collectingSinceUptime)) return
+            if (!started || paused) return
+            val effectiveAt = if (semantic && at < collectingSinceUptime) {
+                if (collectingSinceUptime - at <= 500L) collectingSinceUptime else return
+            } else {
+                at
+            }
             val cx = (rect.exactCenterX().toDouble() / screenWidth).coerceIn(0.0, 1.0)
             val cy = (rect.exactCenterY().toDouble() / screenHeight).coerceIn(0.0, 1.0)
             val previous = lastAcceptedClick
+            if (onlyIfNoRecentTap && previous != null && effectiveAt - previous.atUptime in 0L..FOCUS_SUPPRESS_MS) {
+                return
+            }
             // Some app versions emit both signals for one control activation. Do
             // not deduplicate two ordinary clicks, even at the same location.
             if (previous != null && (semantic || previous.semantic) && source == previous.source &&
-                at - previous.atUptime in 0L..SEMANTIC_DUPLICATE_MS &&
+                effectiveAt - previous.atUptime in 0L..SEMANTIC_DUPLICATE_MS &&
                 abs(cx - previous.cx) < 0.03 && abs(cy - previous.cy) < 0.03
             ) return
             flushLocked()
-            val click = PendingClick(cx, cy, at, source, semantic)
+            val click = PendingClick(cx, cy, effectiveAt, source, semantic)
             lastAcceptedClick = click
             pendingClick = click
-            if (semantic) flushLocked(releaseUptime = at)
+            if (semantic) flushLocked(releaseUptime = effectiveAt)
         }
         if (!semantic) handler?.postDelayed(releaseGrace, RELEASE_GRACE_MS)
     }
@@ -449,6 +475,9 @@ class TelemetryAccessibilityService : AccessibilityService() {
     private var lastActivityClass: String? = null
     private var lastExternalWindowOpenAt = 0L
     private var pendingChromePopupStartAt = 0L
+    private var lastFocusedPackage: String? = null
+    private var lastFocusedRect: Rect? = null
+    private var lastFocusedAt = 0L
     private var cachedHomePackages: Set<String>? = null
     private var cachedLaunchLabels: Map<String, String>? = null
 
@@ -476,6 +505,10 @@ class TelemetryAccessibilityService : AccessibilityService() {
             if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
                 clearHome()
                 pendingChromePopupStartAt = 0L
+                lastChromeMenuWindowId = null
+                lastFocusedPackage = null
+                lastFocusedRect = null
+                lastFocusedAt = 0L
             }
             return
         }
@@ -486,6 +519,9 @@ class TelemetryAccessibilityService : AccessibilityService() {
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             updateWindowTransitions(event, source)
             handleHomeTransition(event, source)
+            imeOpenedInputBounds(event, source)?.let { (at, targetPkg, rect) ->
+                TouchTelemetry.onSemanticActivation(at, targetPkg, rect, onlyIfNoRecentTap = true)
+            }
         }
         if (source != null && (source == packageName || source in SYSTEM_PACKAGES)) return
 
@@ -502,6 +538,11 @@ class TelemetryAccessibilityService : AccessibilityService() {
                 }
                 TouchTelemetry.onEvent(event) { boundsOf(event) }
             }
+
+            AccessibilityEvent.TYPE_VIEW_FOCUSED ->
+                focusedInputBounds(event, source)?.let { rect ->
+                    TouchTelemetry.onSemanticActivation(event, rect, onlyIfNoRecentTap = true)
+                }
 
             AccessibilityEvent.TYPE_VIEW_SELECTED ->
                 selectedTabBounds(event)?.let { TouchTelemetry.onSemanticActivation(event, it) }
@@ -526,12 +567,22 @@ class TelemetryAccessibilityService : AccessibilityService() {
     private fun updateWindowTransitions(event: AccessibilityEvent, source: String?) {
         val cls = event.className?.toString() ?: return
         if (source == null || source == packageName || source in SYSTEM_PACKAGES) return
-        val looksLikeWindowRoot = '.' in cls &&
+        if (source == CHROME && (cls.endsWith("TabbedActivity") || cls.endsWith("CustomTabActivity"))) {
+            lastChromeMenuWindowId = null
+        }
+        val looksLikeActivity = '.' in cls &&
             !cls.startsWith("android.widget.") &&
-            !cls.startsWith("android.view.")
-        if (source != lastWindowPackage || (looksLikeWindowRoot && cls != lastActivityClass)) {
+            !cls.startsWith("android.view.") &&
+            !cls.startsWith("android.inputmethodservice.")
+        if (source != lastWindowPackage || (looksLikeActivity && cls.endsWith("Activity") && cls != lastActivityClass)) {
+            if (source != lastWindowPackage) {
+                lastChromeMenuWindowId = null
+                lastFocusedPackage = null
+                lastFocusedRect = null
+                lastFocusedAt = 0L
+            }
             lastWindowPackage = source
-            if (looksLikeWindowRoot) lastActivityClass = cls
+            if (looksLikeActivity) lastActivityClass = cls
             val at = event.eventTime
             if (at > 0L) lastExternalWindowOpenAt = at
         }
@@ -579,7 +630,8 @@ class TelemetryAccessibilityService : AccessibilityService() {
         if (source == null || eventClass == null) return false
         if (source !in resolveHomePackages()) return false
         if (eventClass == OXYGEN_HOME_ACTIVITY || eventClass == PIXEL_HOME_ACTIVITY) return true
-        return (eventClass.endsWith(".Launcher") || eventClass.endsWith("LauncherActivity")) &&
+        return (eventClass.endsWith(".Launcher") || eventClass.endsWith("LauncherActivity") ||
+            eventClass.contains("Launcher", ignoreCase = false)) &&
             !eventClass.contains("Recents", ignoreCase = true)
     }
 
@@ -602,13 +654,14 @@ class TelemetryAccessibilityService : AccessibilityService() {
             homePackageName = source
             homeEnteredAt = event.eventTime.takeIf { it > 0L } ?: SystemClock.uptimeMillis()
             visibleHomeIcons = readHomeIcons(windowId, source)
-            if (visibleHomeIcons.isEmpty()) {
-                handler.postDelayed({
-                    if (generation == homeGeneration && TouchTelemetry.isCollecting()) {
-                        visibleHomeIcons = readHomeIcons(windowId, source)
-                    }
-                }, 140L)
-            }
+            // Always schedule one settle refresh so page switches and "Apps list"
+            // drawer transitions update visible icon bounds cleanly.
+            handler.postDelayed({
+                if (generation == homeGeneration && TouchTelemetry.isCollecting()) {
+                    val refreshed = readHomeIcons(windowId, source)
+                    if (refreshed.isNotEmpty()) visibleHomeIcons = refreshed
+                }
+            }, 140L)
             return
         }
         // Recents / non-home windows or already-clicked launcher launches must not synthesize another tap.
@@ -653,17 +706,38 @@ class TelemetryAccessibilityService : AccessibilityService() {
         val duplicated = HashSet<String>()
         var visited = 0
 
+        fun collectChildLabel(node: AccessibilityNodeInfo, depth: Int = 0): String? {
+            val own = node.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+                ?: node.contentDescription?.toString()?.trim()
+                    ?.removePrefix(PIXEL_PREDICTED_PREFIX)?.trim()?.takeIf { it.isNotEmpty() }
+            if (own != null) return own
+            if (depth >= 2) return null
+            val childCount = node.childCount.coerceAtMost(6)
+            for (i in 0 until childCount) {
+                val child = node.getChild(i) ?: continue
+                try {
+                    val found = collectChildLabel(child, depth + 1)
+                    if (found != null) return found
+                } finally {
+                    @Suppress("DEPRECATION")
+                    child.recycle()
+                }
+            }
+            return null
+        }
+
         fun visit(node: AccessibilityNodeInfo) {
-            if (visited++ >= 240) return
+            if (visited++ >= MAX_HOME_ICON_NODES) return
             if (node.isClickable && node.isVisibleToUser) {
                 val rect = Rect().also(node::getBoundsInScreen)
                 if (TouchTelemetry.isLauncherIcon(rect)) {
-                    val candidates = sequenceOf(
-                        node.text?.toString()?.trim(),
-                        node.contentDescription?.toString()?.trim()
-                            ?.removePrefix(PIXEL_PREDICTED_PREFIX)?.trim(),
-                    ).filterNotNull().filter { it.isNotEmpty() }
-                    val pkg = candidates.mapNotNull { labels[it] }.firstOrNull()
+                    val directText = node.text?.toString()?.trim()
+                    val directDesc = node.contentDescription?.toString()?.trim()
+                        ?.removePrefix(PIXEL_PREDICTED_PREFIX)?.trim()
+                    val labelCandidate = listOfNotNull(directText, directDesc)
+                        .firstOrNull { it.isNotEmpty() }
+                        ?: collectChildLabel(node)
+                    val pkg = labelCandidate?.let { labels[it] }
                     if (pkg != null && pkg !in duplicated) {
                         val existing = matched[pkg]
                         if (existing != null && existing != rect) {
@@ -699,11 +773,18 @@ class TelemetryAccessibilityService : AccessibilityService() {
     /**
      * Recognize selected horizontal navigation tabs and segmented bars across apps
      * (bottom bars, Material `TabLayout`, Compose `NavigationBar`/`TabRow`), while
-     * rejecting initial launch selections, lists, and ViewPager swipes.
+     * rejecting initial launch selections, sliders/progress indicators, and ViewPager swipes.
      */
     private fun selectedTabBounds(event: AccessibilityEvent): Rect? {
         val cls = event.className?.toString()
-        if (cls == "androidx.viewpager.widget.ViewPager" || cls == "androidx.viewpager2.widget.ViewPager2") {
+        if (cls != null && (
+                cls == "androidx.viewpager.widget.ViewPager" ||
+                    cls == "androidx.viewpager2.widget.ViewPager2" ||
+                    cls.endsWith("ProgressBar") ||
+                    cls.endsWith("SeekBar") ||
+                    cls.endsWith("RatingBar")
+                )
+        ) {
             return null
         }
         val at = event.eventTime
@@ -712,27 +793,147 @@ class TelemetryAccessibilityService : AccessibilityService() {
         ) {
             return null
         }
-        val node = event.source ?: return null
-        var p1: AccessibilityNodeInfo? = null
-        var p2: AccessibilityNodeInfo? = null
+        val source = event.source ?: return null
+        var selectedNode: AccessibilityNodeInfo? = null
+        val ancestors = ArrayList<AccessibilityNodeInfo>(3)
         return try {
-            if (!node.isSelected || !node.isVisibleToUser) return null
-            val rawTab = Rect().also(node::getBoundsInScreen)
+            selectedNode = resolveSelectedTabNode(event, source) ?: return null
+            val rawTab = Rect().also(selectedNode::getBoundsInScreen)
             val tab = TouchTelemetry.normalizeInteractiveBounds(rawTab) ?: return null
-            p1 = node.parent ?: return null
-            val bar1 = Rect().also(p1::getBoundsInScreen)
-            if (TouchTelemetry.isHorizontalNavigationTab(tab, bar1)) return tab
-            p2 = p1.parent ?: return null
-            val bar2 = Rect().also(p2::getBoundsInScreen)
-            tab.takeIf { TouchTelemetry.isHorizontalNavigationTab(tab, bar2) }
+            var cur = selectedNode.parent
+            repeat(3) {
+                val parent = cur ?: return@repeat
+                ancestors.add(parent)
+                val barRect = Rect().also(parent::getBoundsInScreen)
+                if (TouchTelemetry.isHorizontalNavigationTab(tab, barRect)) return tab
+                cur = parent.parent
+            }
+            null
         } finally {
+            for (node in ancestors) {
+                @Suppress("DEPRECATION")
+                node.recycle()
+            }
+            if (selectedNode != null && selectedNode !== source) {
+                @Suppress("DEPRECATION")
+                selectedNode.recycle()
+            }
             @Suppress("DEPRECATION")
-            p2?.recycle()
-            @Suppress("DEPRECATION")
-            p1?.recycle()
+            source.recycle()
+        }
+    }
+
+    private fun resolveSelectedTabNode(
+        event: AccessibilityEvent,
+        source: AccessibilityNodeInfo,
+    ): AccessibilityNodeInfo? {
+        if (source.isSelected && source.isVisibleToUser) return source
+        if (source.isScrollable) return null
+        val count = source.childCount
+        if (count <= 0) return null
+        val idx = event.currentItemIndex
+        if (idx in 0 until count) {
+            val child = source.getChild(idx)
+            if (child != null) {
+                if (child.isVisibleToUser && !child.isScrollable) return child
+                @Suppress("DEPRECATION")
+                child.recycle()
+            }
+        }
+        var found: AccessibilityNodeInfo? = null
+        for (i in 0 until count.coerceAtMost(12)) {
+            val child = source.getChild(i) ?: continue
+            if (child.isSelected && child.isVisibleToUser && !child.isScrollable) {
+                if (found != null) {
+                    @Suppress("DEPRECATION")
+                    found.recycle()
+                    @Suppress("DEPRECATION")
+                    child.recycle()
+                    return null
+                }
+                found = child
+            } else {
+                @Suppress("DEPRECATION")
+                child.recycle()
+            }
+        }
+        return found
+    }
+
+    private fun isTextInputNode(node: AccessibilityNodeInfo): Boolean {
+        if (node.isEditable) return true
+        val cls = node.className?.toString() ?: return false
+        return cls == "android.widget.EditText" ||
+            cls == "android.widget.AutoCompleteTextView" ||
+            cls == "android.widget.MultiAutoCompleteTextView" ||
+            cls == "androidx.appcompat.widget.SearchView"
+    }
+
+    private fun acceptFocusedInputRect(at: Long, pkg: String?, rect: Rect): Rect? {
+        val previousRect = lastFocusedRect
+        if (pkg == lastFocusedPackage && previousRect != null &&
+            at - lastFocusedAt in 0L..FOCUS_REPEAT_WINDOW_MS &&
+            abs(rect.centerX() - previousRect.centerX()) <= 24 &&
+            abs(rect.centerY() - previousRect.centerY()) <= 24
+        ) {
+            return null
+        }
+        lastFocusedPackage = pkg
+        lastFocusedRect = Rect(rect)
+        lastFocusedAt = at
+        return rect
+    }
+
+    private fun focusedInputBounds(event: AccessibilityEvent, sourcePkg: String?): Rect? {
+        val at = event.eventTime.takeIf { it > 0L } ?: SystemClock.uptimeMillis()
+        if (lastExternalWindowOpenAt > 0L && at - lastExternalWindowOpenAt in 0L..FOCUS_WINDOW_SETTLE_MS) {
+            return null
+        }
+        val node = event.source ?: return null
+        return try {
+            if (!node.isFocused || !node.isVisibleToUser || !node.isEnabled || !isTextInputNode(node)) {
+                return null
+            }
+            val raw = Rect().also(node::getBoundsInScreen)
+            val rect = TouchTelemetry.normalizeInteractiveBounds(raw) ?: return null
+            acceptFocusedInputRect(at, sourcePkg, rect)
+        } finally {
             @Suppress("DEPRECATION")
             node.recycle()
         }
+    }
+
+    private fun imeOpenedInputBounds(
+        event: AccessibilityEvent,
+        sourcePkg: String?,
+    ): Triple<Long, String, Rect>? {
+        val cls = event.className?.toString() ?: return null
+        if (cls != "android.inputmethodservice.SoftInputWindow") return null
+        if (event.contentChangeTypes and AccessibilityEvent.CONTENT_CHANGE_TYPE_PANE_DISAPPEARED != 0) {
+            return null
+        }
+        val at = event.eventTime.takeIf { it > 0L } ?: SystemClock.uptimeMillis()
+        val appWindows = windows.filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
+        for (window in appWindows) {
+            val root = window.root ?: continue
+            var focused: AccessibilityNodeInfo? = null
+            try {
+                focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT) ?: continue
+                if (!focused.isVisibleToUser || !focused.isEnabled || !isTextInputNode(focused)) continue
+                val focusedPkg = focused.packageName?.toString() ?: root.packageName?.toString() ?: continue
+                if (focusedPkg == packageName || focusedPkg in SYSTEM_PACKAGES || focusedPkg == sourcePkg) continue
+                val rect = TouchTelemetry.normalizeInteractiveBounds(Rect().also(focused::getBoundsInScreen))
+                    ?: continue
+                val accepted = acceptFocusedInputRect(at, focusedPkg, rect) ?: continue
+                return Triple(at, focusedPkg, accepted)
+            } finally {
+                @Suppress("DEPRECATION")
+                focused?.recycle()
+                @Suppress("DEPRECATION")
+                root.recycle()
+            }
+        }
+        return null
     }
 
     /**
@@ -750,6 +951,7 @@ class TelemetryAccessibilityService : AccessibilityService() {
         val hasMenuList = popup.packageName?.toString() == CHROME &&
             popup.findAccessibilityNodeInfosByViewId("$CHROME:id/app_menu_list").isNotEmpty()
         if (!hasMenuList) {
+            if (event.windowId == lastChromeMenuWindowId) lastChromeMenuWindowId = null
             val maxW = (resources.displayMetrics.widthPixels * 0.9).toInt()
             val maxH = resources.displayMetrics.heightPixels / 2
             if (!popupRect.isEmpty && popupRect.width() < maxW && popupRect.height() in 1 until maxH) {
@@ -785,7 +987,21 @@ class TelemetryAccessibilityService : AccessibilityService() {
         val node = event.source ?: return null
         return try {
             node.getBoundsInScreen(boundsRect)
-            TouchTelemetry.normalizeInteractiveBounds(boundsRect)
+            val normalized = TouchTelemetry.normalizeInteractiveBounds(boundsRect)
+            if (normalized != null) return normalized
+            if (node.childCount == 1) {
+                val child = node.getChild(0) ?: return null
+                try {
+                    if (child.isVisibleToUser && (child.isClickable || child.isFocusable)) {
+                        child.getBoundsInScreen(boundsRect)
+                        return TouchTelemetry.normalizeInteractiveBounds(boundsRect)
+                    }
+                } finally {
+                    @Suppress("DEPRECATION")
+                    child.recycle()
+                }
+            }
+            null
         } finally {
             @Suppress("DEPRECATION")
             node.recycle()
@@ -804,10 +1020,13 @@ class TelemetryAccessibilityService : AccessibilityService() {
         private const val OXYGEN_HOME_ACTIVITY = "$OXYGEN_HOME.Launcher"
         private const val PIXEL_HOME_ACTIVITY = "$PIXEL_HOME.NexusLauncherActivity"
         private const val PIXEL_PREDICTED_PREFIX = "Predicted app:"
-        private const val DOCK_SPLASH_TIMEOUT_MS = 1500L
+        private const val DOCK_SPLASH_TIMEOUT_MS = 3500L
         private const val LAUNCH_TRANSITION_DELAY_MS = 220L
         private const val CHROME_MENU_OPEN_DELAY_MS = 220L
-        private const val TAB_SETTLE_AFTER_WINDOW_MS = 250L
+        private const val TAB_SETTLE_AFTER_WINDOW_MS = 150L
+        private const val FOCUS_WINDOW_SETTLE_MS = 350L
+        private const val FOCUS_REPEAT_WINDOW_MS = 2000L
+        private const val MAX_HOME_ICON_NODES = 1500
         private val KNOWN_HOME_PACKAGES = setOf(OXYGEN_HOME, PIXEL_HOME, AOSP_LAUNCHER)
 
         /**

@@ -79,6 +79,11 @@ async function openHud(page) {
         }
     }
     assert.ok(page.url().includes('windowType=hud-overlay'), 'Could not open the recording HUD');
+    // When overlay permission is denied, showRecordingHud opens system settings
+    // over MainActivity while switching the WebView to hud-overlay; bring the
+    // fallback HUD back to the foreground just as a user backing out does.
+    await shell(['am', 'start', '-W', '-n', `${packageName}/app.recordly.android.MainActivity`]);
+    await delay(500);
     const closeToast = page.getByRole('button', { name: 'Close', exact: true });
     if (await closeToast.count()) await closeToast.click({ timeout: 10_000 });
 }
